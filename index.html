@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Railway Line Waves — minimal</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    #variant-tag {
+      position: fixed; top: 8px; left: 8px; z-index: 10;
+      font: 11px/1 ui-monospace, monospace;
+      background: rgba(32, 90, 180, 0.85); color: #fff;
+      padding: 4px 8px; border-radius: 4px; letter-spacing: 0.04em;
+    }
+    /* Tabs — one per parameter group. */
+    .tabs {
+      display: flex; flex-wrap: wrap; gap: 2px;
+      margin: 6px 0 6px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 4px;
+    }
+    .tab-btn {
+      background: rgba(255, 255, 255, 0.04);
+      color: #9aa4b0;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      padding: 3px 7px;
+      font: 10px ui-monospace, monospace;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .tab-btn:hover { color: #e9e9e9; }
+    .tab-btn.active {
+      background: rgba(100, 140, 200, 0.22);
+      color: #fff;
+      border-color: rgba(140, 170, 220, 0.4);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .tab-panel > h2 { display: none; }
+    .sub-head {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+      color: #cfd3d8; margin-bottom: 4px;
+    }
+    .sub-block {
+      border-top: 1px dashed rgba(255, 255, 255, 0.08);
+      padding-top: 6px;
+      margin-top: 6px;
+    }
+    #reroll-btn {
+      background: rgba(255,255,255,0.06); color: #9aa4b0;
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;
+      padding: 3px 8px; font: 10px ui-monospace, monospace;
+      letter-spacing: 0.04em; cursor: pointer; margin-top: 4px;
+    }
+    #reroll-btn:hover { color: #e9e9e9; }
+    #pinned-view {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .lane-color-row {
+      display: flex; gap: 4px; padding-top: 4px;
+    }
+    .lane-color-row input[type="color"] {
+      flex: 1 1 0; width: auto; height: 22px;
+      padding: 0; margin: 0;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 3px; background: transparent; cursor: pointer;
+    }
+    #pinned-export {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    #export-btn,
+    .preset-btn {
+      background: rgba(255,255,255,0.06); color: #9aa4b0;
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;
+      padding: 5px 10px; font: 10px ui-monospace, monospace;
+      letter-spacing: 0.04em; cursor: pointer; margin-top: 6px;
+      width: 100%;
+    }
+    #export-btn:hover:not(:disabled),
+    .preset-btn:hover { color: #e9e9e9; }
+    #export-btn:disabled { opacity: 0.6; cursor: progress; }
+    #pinned-preset {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .preset-hint {
+      margin-top: 6px;
+      font: 10px ui-monospace, monospace;
+      color: #666;
+      line-height: 1.4;
+    }
+    /* Modulator cards — compact rows of inputs, one card per active LFO. */
+    .mod-card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 4px;
+      padding: 6px;
+      margin-bottom: 6px;
+    }
+    .mod-card.disabled { opacity: 0.5; }
+    .mod-row {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      margin-bottom: 3px;
+    }
+    .mod-row > * { flex: 1; }
+    .mod-card select,
+    .mod-card input[type="number"] {
+      background: rgba(255,255,255,0.05);
+      color: #e9e9e9;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 3px;
+      padding: 2px 4px;
+      font: 10px ui-monospace, monospace;
+      min-width: 0;
+      width: 100%;
+    }
+    .mod-card .mod-num {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      font: 9px ui-monospace, monospace;
+      color: #8a94a0;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .mod-card .mod-remove {
+      background: rgba(255,255,255,0.06);
+      color: #9aa4b0;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 3px;
+      width: 22px;
+      height: 22px;
+      font: 14px/1 ui-monospace, monospace;
+      cursor: pointer;
+      flex: 0 0 22px;
+    }
+    .mod-card .mod-remove:hover { color: #fff; }
+    .mod-toggle {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font: 10px ui-monospace, monospace;
+      color: #c4c8cd;
+    }
+    body.dragging-preset::after {
+      content: 'Drop preset to load';
+      position: fixed; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(20, 30, 50, 0.55);
+      color: #fff; font: 14px ui-monospace, monospace;
+      letter-spacing: 0.06em; pointer-events: none; z-index: 999;
+      border: 2px dashed rgba(140, 170, 220, 0.6);
+    }
+  </style>
+</head>
+<body>
+  <div id="variant-tag">three.js — minimal</div>
+  <main class="stage">
+    <canvas id="scene"></canvas>
+
+    <aside id="panel">
+      <header>
+        <h1>Railway (minimal)</h1>
+        <button id="panel-toggle" title="Collapse">–</button>
+      </header>
+
+      <section id="minimap-section">
+        <h2>Topology</h2>
+        <svg id="minimap" width="100%" height="110" viewBox="0 0 600 110"
+             style="display:block; border-radius:4px; background:rgba(0,0,0,0.35); cursor:crosshair;"></svg>
+        <div id="minimap-controls" style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+          <label class="mod-toggle" style="flex:0 0 auto;">
+            <input type="checkbox" id="draw-toggle"> Draw
+          </label>
+          <button class="preset-btn" id="clear-drawings"
+                  style="margin-top:0; flex:1;">Clear drawings</button>
+        </div>
+      </section>
+
+      <section id="pinned-sim">
+        <label>Speed <input type="range" min="0" max="30000" step="1" data-k="speed"><span data-v="speed"></span></label>
+        <label>Zoom <input type="range" min="0.05" max="2" step="0.01" data-k="viewZoom"><span data-v="viewZoom"></span></label>
+      </section>
+
+      <div class="tabs" role="tablist">
+        <button class="tab-btn active" data-tab="sim">Sim</button>
+        <button class="tab-btn"        data-tab="rails">Rails</button>
+      </div>
+
+      <section class="tab-panel active" data-panel="sim">
+        <h2>Sim</h2>
+        <label>Mode
+          <select data-k="simMode">
+            <option value="scripted">Scripted (looping preset)</option>
+            <option value="procedural">Procedural (seeded roll)</option>
+            <option value="branching">Branching (procedural + spawn/end)</option>
+            <option value="phasing">Phasing (one rail, two pill voices)</option>
+            <option value="convergence">Convergence (rail width)</option>
+            <option value="draw">Draw (custom topology)</option>
+          </select>
+        </label>
+        <div id="scripted-only">
+          <label>Script
+            <select data-k="simScript">
+              <option value="v1">v1 — default (3-lane splits)</option>
+              <option value="v5">v5 — 5-lane splits</option>
+            </select>
+          </label>
+        </div>
+        <label id="loop-segs-label">Loop segs <input type="range" min="10" max="120" step="1" data-k="loopSegs"><span data-v="loopSegs"></span></label>
+        <label>Segment width <input type="range" min="40" max="8000" step="2" data-k="segW"><span data-v="segW"></span></label>
+        <div id="procedural-only" class="sub-block">
+          <div class="sub-head">Procedural</div>
+          <label>Seed <input type="number" min="1" max="99999" step="1" data-k="seed" style="width:80px"></label>
+          <button id="reroll-btn">re-roll (new seed)</button>
+          <label>Merge chance <input type="range" min="0" max="1" step="0.01" data-k="mergeChance"><span data-v="mergeChance"></span></label>
+          <label>Split chance <input type="range" min="0" max="1" step="0.01" data-k="splitChance"><span data-v="splitChance"></span></label>
+          <label>Max tracks <input type="range" min="1" max="9" step="1" data-k="maxTracks"><span data-v="maxTracks"></span></label>
+        </div>
+        <div id="branching-only" class="sub-block">
+          <div class="sub-head">Branching</div>
+          <label>Spawn chance <input type="range" min="0" max="1" step="0.01" data-k="spawnChance"><span data-v="spawnChance"></span></label>
+          <label>End chance <input type="range" min="0" max="1" step="0.01" data-k="endChance"><span data-v="endChance"></span></label>
+          <div class="preset-hint">Per-segment chance a new rail spawns with a stub-entry from the top/bottom edge. Per-rail per-segment chance an existing rail terminates with a stub-exit to an edge.</div>
+        </div>
+        <div id="convergence-only" class="sub-block">
+          <div class="sub-head">Convergence</div>
+          <label>Stack pattern
+            <select data-k="convergencePattern">
+              <option value="adjacent">Adjacent (touching, original order)</option>
+              <option value="stacked">Stacked (heavy overlap at centre)</option>
+              <option value="swap">Swap (yellow ↔ red, touching)</option>
+              <option value="gap">Gap (top pair touching, bottom isolated)</option>
+              <option value="inverted">Inverted (top ↔ bottom)</option>
+              <option value="weave">Weave (cross over while stacking)</option>
+              <option value="braid">Braid (continuous crossing in narrow zone)</option>
+              <option value="shuffle">Shuffle (split/merge while narrow)</option>
+            </select>
+          </label>
+        </div>
+        <div id="taper-only" class="sub-block">
+          <label>Merge taper <input type="range" min="0" max="1" step="0.01" data-k="convergenceTaper"><span data-v="convergenceTaper"></span></label>
+          <div class="preset-hint">Narrows rails through the merged phase of the loop (0 = constant width, 1 = ≈15% width at merge).</div>
+        </div>
+        <div id="draw-only" class="sub-block">
+          <div class="sub-head">Draw</div>
+          <label>Init lanes <input type="text" data-k="drawInitLanes" placeholder="e.g. 0 3 6" style="width:120px"></label>
+          <div class="preset-hint">Drag in the topology to add a <b>MERGE</b> (relocate an existing rail). Hold ⇧&nbsp;Shift while dragging to add a <b>SPLIT</b> (spawn a new rail). The loop length is set by <i>Loop segs</i>.</div>
+        </div>
+        <div id="phasing-only" class="sub-block">
+          <div class="sub-head">Phasing pills</div>
+          <label>Pill spacing <input type="range" min="40" max="800" step="1" data-k="phasePillSpacing"><span data-v="phasePillSpacing"></span></label>
+          <label>Pill length <input type="range" min="4" max="400" step="1" data-k="phasePillLength"><span data-v="phasePillLength"></span></label>
+          <label>Pill height <input type="range" min="2" max="200" step="1" data-k="phasePillHeight"><span data-v="phasePillHeight"></span></label>
+          <label>Group A opacity <input type="range" min="0" max="1" step="0.01" data-k="phasePillOpacityA"><span data-v="phasePillOpacityA"></span></label>
+          <label>Color A <input type="color" data-k="phaseColorA"></label>
+        </div>
+        <div id="modulators-block" class="sub-block">
+          <div class="sub-head">Modulators</div>
+          <div id="modulators-list"></div>
+          <button class="preset-btn" id="add-modulator">+ Add modulator</button>
+          <div class="preset-hint">LFO-modulate any value around its sweet spot.</div>
+        </div>
+      </section>
+
+      <section class="tab-panel" data-panel="rails">
+        <h2>Rails</h2>
+        <label>Blend mode
+          <select data-k="blendMode">
+            <option value="normal">Normal</option>
+            <option value="multiply">Multiply</option>
+            <option value="screen">Screen</option>
+            <option value="darken">Darken</option>
+            <option value="lighten">Lighten</option>
+            <option value="overlay">Overlay</option>
+            <option value="difference">Difference</option>
+            <option value="plus-lighter">Plus lighter</option>
+          </select>
+        </label>
+        <div class="sub-block">
+          <div class="sub-head">Rail colors</div>
+          <label>Palette
+            <select id="palette-select">
+              <option value="default">Default (HSL spread)</option>
+              <option value="pastel">Pastel</option>
+              <option value="neon">Neon</option>
+              <option value="earth">Earth</option>
+              <option value="sunset">Sunset</option>
+              <option value="ocean">Ocean</option>
+              <option value="mono">Mono</option>
+            </select>
+          </label>
+          <label>Hue shift <input type="range" min="0" max="1" step="0.01" data-k="paletteHueOffset"><span data-v="paletteHueOffset"></span></label>
+          <label>Saturation <input type="range" min="0" max="1" step="0.01" data-k="paletteSat"><span data-v="paletteSat"></span></label>
+          <label>Lightness <input type="range" min="0" max="1" step="0.01" data-k="paletteLight"><span data-v="paletteLight"></span></label>
+          <button class="preset-btn" id="palette-randomize">Randomize</button>
+          <div class="lane-color-row" id="lane-color-row"></div>
+        </div>
+        <label>Rail width <input type="range" min="4" max="200" step="1" data-k="railWidth"><span data-v="railWidth"></span></label>
+        <label>Softness <input type="range" min="0" max="1" step="0.01" data-k="railSoft"><span data-v="railSoft"></span></label>
+        <label>Falloff sigma <input type="range" min="0.2" max="1.5" step="0.01" data-k="railSigma"><span data-v="railSigma"></span></label>
+        <label>Lane space <input type="range" min="40" max="600" step="2" data-k="laneSpace"><span data-v="laneSpace"></span></label>
+        <label>Rail opacity <input type="range" min="0" max="1" step="0.01" data-k="railOpacity"><span data-v="railOpacity"></span></label>
+
+        <div class="sub-block">
+          <div class="sub-head">Ticks (zoetrope)</div>
+          <label>Amount <input type="range" min="0" max="1" step="0.01" data-k="tickAmount"><span data-v="tickAmount"></span></label>
+          <label>Spacing <input type="range" min="20" max="2000" step="1" data-k="tickSpacing"><span data-v="tickSpacing"></span></label>
+          <label>Width <input type="range" min="2" max="500" step="1" data-k="tickWidth"><span data-v="tickWidth"></span></label>
+          <button class="preset-btn" id="snap-freeze">Snap to freeze speed</button>
+          <div class="preset-hint" id="freeze-hint">freeze ≈ — wu/s @ 60 Hz</div>
+        </div>
+
+        <div class="sub-block">
+          <div class="sub-head">Ink traps</div>
+          <label>Amount <input type="range" min="0" max="400" step="1" data-k="inkTrapAmount"><span data-v="inkTrapAmount"></span></label>
+          <label>Spacing <input type="range" min="100" max="6000" step="10" data-k="inkTrapSpacing"><span data-v="inkTrapSpacing"></span></label>
+          <label>Density <input type="range" min="0" max="1" step="0.01" data-k="inkTrapDensity"><span data-v="inkTrapDensity"></span></label>
+          <label>Width <input type="range" min="20" max="800" step="2" data-k="inkTrapWidth"><span data-v="inkTrapWidth"></span></label>
+          <label>Direction <input type="range" min="0" max="1" step="0.01" data-k="inkTrapDirection"><span data-v="inkTrapDirection"></span></label>
+        </div>
+      </section>
+
+      <section id="pinned-view">
+        <div class="sub-head">View</div>
+        <label>Background <input type="color" data-k="bgColor"></label>
+      </section>
+
+      <section id="pinned-export">
+        <div class="sub-head">Export</div>
+        <label>Frames <input type="number" min="1" max="9999" step="1" data-k="exportFrames" style="width:72px"></label>
+        <label>FPS <input type="number" min="1" max="120" step="1" data-k="exportFps" style="width:72px"></label>
+        <button id="export-btn">Export PNG sequence</button>
+      </section>
+
+      <section id="pinned-preset">
+        <div class="sub-head">Preset</div>
+        <button class="preset-btn" id="preset-save">Save current as preset</button>
+        <button class="preset-btn" id="preset-revert">Revert to defaults</button>
+        <div class="preset-hint">Drop a saved .json onto the canvas to load it.</div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- Tab switcher — hide/show panels on click. -->
+  <script>
+    (function () {
+      const tabs   = document.querySelectorAll('.tab-btn');
+      const panels = document.querySelectorAll('.tab-panel');
+      tabs.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.tab;
+          tabs.forEach(b   => b.classList.toggle('active', b === btn));
+          panels.forEach(p => p.classList.toggle('active', p.dataset.panel === key));
+        });
+      });
+    })();
+  </script>
+
+  <!-- Three.js UMD (r150 = last UMD release) so file:// works. -->
+  <script src="https://unpkg.com/three@0.150.0/build/three.min.js"></script>
+  <!-- JSZip — used as a fallback when the File System Access API isn't
+       available (Firefox / Safari) so the export bundles into one .zip. -->
+  <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="sim.js?v=31"></script>
+  <script src="app-three.js?v=31"></script>
+</body>
+</html>
