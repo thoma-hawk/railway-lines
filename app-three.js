@@ -1074,7 +1074,56 @@ const MOD_WAVEFORMS = [
   { key: 'sq',       label: 'Hold',          fn: (p) => p < 0.5 ? 1 : 0 },
   { key: 'sawUp',    label: 'Saw ↑ (ramp)',  fn: (p) => p },
   { key: 'sawDown',  label: 'Saw ↓ (snap)',  fn: (p) => 1 - p },
+  // Keyframes is handled out-of-band in stepModulators — fn isn't used,
+  // but we keep the entry so it shows up in the waveform dropdown.
+  { key: 'keyframes', label: 'Keyframes',    fn: (p) => 0 },
 ];
+
+// Per-keyframe easing curves. The string on a keyframe `{t, v, ease}`
+// controls how the value travels OUT of that keyframe toward the next
+// one — so set `ease: "easeIn"` on the keyframe that's the START of a
+// soft-start segment. `hold` is a step (no interp; stays at lo until
+// hi's time, then snaps), useful for stair-step envelopes.
+const KF_EASINGS = {
+  linear:       (x) => x,
+  easeIn:       (x) => x * x,
+  easeOut:      (x) => 1 - (1 - x) * (1 - x),
+  easeInOut:    (x) => x * x * (3 - 2 * x),
+  smooth:       (x) => x * x * (3 - 2 * x),                                 // synonym for easeInOut
+  smoother:     (x) => x * x * x * (x * (x * 6 - 15) + 10),                 // Perlin's smootherstep
+  easeInCubic:  (x) => x * x * x,
+  easeOutCubic: (x) => 1 - (1 - x) * (1 - x) * (1 - x),
+  easeInQuart:  (x) => x * x * x * x,
+  easeOutQuart: (x) => 1 - Math.pow(1 - x, 4),
+  hold:         (x) => 0,                                                   // step
+};
+const KF_EASING_KEYS = Object.keys(KF_EASINGS);
+
+// Evaluate a keyframe envelope at phase `tSec` (seconds into the cycle,
+// already wrapped to [0, period)). Each keyframe is `{ t: seconds,
+// v: value, ease?: string }`. Returns the interpolated value directly
+// (in target units, not 0..1). Needs ≥ 2 keyframes; falls back to v of
+// the first / last keyframe outside the span.
+function evalKeyframes(tSec, keyframes) {
+  if (!Array.isArray(keyframes) || keyframes.length === 0) return 0;
+  if (keyframes.length === 1) return Number(keyframes[0].v) || 0;
+  const kfs = keyframes.slice().sort((a, b) => (a.t || 0) - (b.t || 0));
+  if (tSec <= kfs[0].t) return Number(kfs[0].v) || 0;
+  const last = kfs[kfs.length - 1];
+  if (tSec >= last.t) return Number(last.v) || 0;
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const lo = kfs[i], hi = kfs[i + 1];
+    if (tSec >= lo.t && tSec <= hi.t) {
+      const span = Math.max(hi.t - lo.t, 1e-4);
+      const tt   = (tSec - lo.t) / span;
+      const ease = KF_EASINGS[lo.ease] || KF_EASINGS.linear;
+      const e    = ease(tt);
+      const lv = Number(lo.v) || 0, hv = Number(hi.v) || 0;
+      return lv + (hv - lv) * e;
+    }
+  }
+  return Number(last.v) || 0;
+}
 // Migrate any pre-min/max modulators (sweetSpot + amount) to the new shape
 // in place, so old presets keep working.
 function migrateModulator(m) {
@@ -1095,11 +1144,24 @@ function stepModulators(dt) {
     migrateModulator(m);
     const tgt = MOD_TARGETS.find(t => t.key === m.target);
     if (!tgt) continue;
-    const cycle = Math.max(m.cycle || 0.05, 0.05);
-    m.t = (((m.t || 0) + dt) % cycle + cycle) % cycle;
-    const wave = (MOD_WAVEFORMS.find(w => w.key === m.waveform) || MOD_WAVEFORMS[0]).fn;
-    const v01  = wave(m.t / cycle);                        // shape fn returns 0..1
-    let val    = m.min + (m.max - m.min) * v01;
+
+    let val;
+    if (m.waveform === 'keyframes' && Array.isArray(m.keyframes) && m.keyframes.length >= 2) {
+      // Keyframe envelope. The cycle period is implicit — it's the
+      // largest t in the keyframe list, so adding a final keyframe at
+      // (period, startValue) closes the loop. m.t advances by dt and
+      // wraps modulo that period.
+      const last = m.keyframes.reduce((mx, k) => Math.max(mx, k.t || 0), 0);
+      const period = Math.max(last, 0.05);
+      m.t = (((m.t || 0) + dt) % period + period) % period;
+      val = evalKeyframes(m.t, m.keyframes);
+    } else {
+      const cycle = Math.max(m.cycle || 0.05, 0.05);
+      m.t = (((m.t || 0) + dt) % cycle + cycle) % cycle;
+      const wave = (MOD_WAVEFORMS.find(w => w.key === m.waveform) || MOD_WAVEFORMS[0]).fn;
+      const v01  = wave(m.t / cycle);                        // shape fn returns 0..1
+      val = m.min + (m.max - m.min) * v01;
+    }
     val = Math.max(tgt.min, Math.min(tgt.max, val));
     CONFIG[m.target] = val;
     touched = true;
@@ -2144,9 +2206,80 @@ function bindGlobalControls() {
       if (w.key === m.waveform) opt.selected = true;
       wsel.appendChild(opt);
     }
-    wsel.addEventListener('change', () => { m.waveform = wsel.value; });
+    wsel.addEventListener('change', () => { m.waveform = wsel.value; rebuildModulatorsList(); });
     row3.appendChild(wsel);
     card.appendChild(row3);
+
+    // Keyframes editor — only when waveform === 'keyframes'. Each row is
+    // a (time, value) input pair plus a remove button. "Add keyframe"
+    // appends one. The cycle period is the largest time in the list, so
+    // keep a final keyframe at the wrap point with the start value to
+    // close the loop cleanly.
+    if (m.waveform === 'keyframes') {
+      if (!Array.isArray(m.keyframes)) {
+        m.keyframes = [
+          { t: 0,  v: tgt.min ?? 0 },
+          { t: 5,  v: tgt.max ?? 1 },
+          { t: 10, v: tgt.min ?? 0 },
+        ];
+      }
+      const kfBlock = document.createElement('div');
+      kfBlock.style.cssText = 'border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 6px; margin-top: 4px;';
+      const hdr = document.createElement('div');
+      hdr.style.cssText = 'display:flex; gap:6px; font:9px ui-monospace, monospace; color:#8a94a0; letter-spacing:0.04em; text-transform:uppercase; margin-bottom:3px;';
+      hdr.innerHTML = '<span style="flex:1">Time (s)</span><span style="flex:1">Value</span><span style="flex:1.4">Ease →</span><span style="width:22px"></span>';
+      kfBlock.appendChild(hdr);
+      for (let ki = 0; ki < m.keyframes.length; ki++) {
+        const kf = m.keyframes[ki];
+        const kRow = document.createElement('div');
+        kRow.className = 'mod-row';
+        const tIn = document.createElement('input');
+        tIn.type = 'number'; tIn.step = '0.1'; tIn.value = kf.t;
+        tIn.style.flex = '1';
+        tIn.addEventListener('input', () => {
+          const v = parseFloat(tIn.value); if (!Number.isNaN(v)) kf.t = v;
+        });
+        const vIn = document.createElement('input');
+        vIn.type = 'number'; vIn.step = tgt.step ?? 1; vIn.value = kf.v;
+        vIn.style.flex = '1';
+        vIn.addEventListener('input', () => {
+          const v = parseFloat(vIn.value); if (!Number.isNaN(v)) kf.v = v;
+        });
+        // Easing dropdown — controls how the value travels OUT of this
+        // keyframe (last keyframe's ease is ignored since there's no
+        // segment after it within the cycle).
+        const eSel = document.createElement('select');
+        eSel.style.flex = '1.4';
+        for (const key of KF_EASING_KEYS) {
+          const opt = document.createElement('option');
+          opt.value = key; opt.textContent = key;
+          if (key === (kf.ease || 'linear')) opt.selected = true;
+          eSel.appendChild(opt);
+        }
+        eSel.addEventListener('change', () => { kf.ease = eSel.value; });
+        const krm = document.createElement('button');
+        krm.className = 'mod-remove'; krm.textContent = '×';
+        krm.title = 'Remove keyframe';
+        krm.addEventListener('click', () => {
+          m.keyframes.splice(ki, 1);
+          rebuildModulatorsList();
+        });
+        kRow.appendChild(tIn); kRow.appendChild(vIn); kRow.appendChild(eSel); kRow.appendChild(krm);
+        kfBlock.appendChild(kRow);
+      }
+      const addBtn = document.createElement('button');
+      addBtn.className = 'preset-btn';
+      addBtn.style.marginTop = '4px';
+      addBtn.textContent = '+ Add keyframe';
+      addBtn.addEventListener('click', () => {
+        const lastT = m.keyframes.reduce((mx, k) => Math.max(mx, k.t || 0), 0);
+        const lastV = (m.keyframes[m.keyframes.length - 1] || { v: 0 }).v;
+        m.keyframes.push({ t: lastT + 1, v: lastV });
+        rebuildModulatorsList();
+      });
+      kfBlock.appendChild(addBtn);
+      card.appendChild(kfBlock);
+    }
 
     // Row 4: enabled toggle.
     const row4 = document.createElement('div');
