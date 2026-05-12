@@ -218,6 +218,13 @@ const CONFIG = {
   // per-frame camera step to a single deterministic value.
   targetFps:    60,
 
+  // When true, the per-frame camera step is rounded to a whole number of
+  // pixels in world units. Each tick then renders at an identical
+  // sub-pixel offset every frame — AA is stable, no temporal aliasing
+  // (the "tick flicker" / "pulsing" problem at non-freeze speeds).
+  // Average speed stays exact via a fractional accumulator.
+  cameraPixelSnap: true,
+
   // LFO modulators — each entry is { target, sweetSpot, amount, cycle,
   // waveform, enabled, t }. Edit/add via the Modulators panel; persisted
   // via preset save/load.
@@ -848,6 +855,12 @@ const mat = new THREE.ShaderMaterial({
           // yellow meet they're all the same pale shade and the colour seam
           // dissolves — matching the figma ribbon-gradient look where each
           // rail fades into a near-background tone before converging.
+          // Early-out: if this fragment is well outside the rail body
+          // there's nothing to paint, so we can skip the (expensive) merge
+          // tint + burst computation entirely. 1.5 covers the figma
+          // shoulder (du≤1) plus a small margin for the gaussian halo.
+          if (abs(dY) > hHalfT * 1.5) continue;
+
           float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0)
                            ? clamp(uColorMergeTaper * mix(phaseSoftStart, phaseSoftEnd, t), 0.0, 1.0)
                            : 0.0;
@@ -858,7 +871,10 @@ const mat = new THREE.ShaderMaterial({
           // along this rail's world-X at its own velocity. Mixed into both
           // the saturated core and the shoulder so the burst inherits the
           // rail's Y cross-section automatically (figma profile downstream).
-          float bA = burstAlpha(wx, rid, uTime);
+          // Skipped entirely when uBurstAmount is 0 (cheap test inside the
+          // function, but the conditional saves a function-call worth of
+          // hashing for the common "no bursts" case).
+          float bA = (uBurstAmount > 1e-3) ? burstAlpha(wx, rid, uTime) : 0.0;
           if (bA > 0.0) {
             ridSat = mix(ridSat, uBurstColor,                    bA);
             ridShl = mix(ridShl, mix(uBurstColor, ridShl, 0.4),  bA);
@@ -1204,15 +1220,34 @@ function tick(timestamp) {
   // (including CONFIG.speed) consistent with the rendered cadence.
   stepModulators(frameDt);
 
-  WORLD.cameraX += CONFIG.speed * frameDt;
+  // Advance the camera. When cameraPixelSnap is on, the per-frame step
+  // is rounded to a whole-pixel multiple in world units so ticks land
+  // at identical sub-pixel offsets every frame — the only way to get a
+  // sharp 1-2 wu wide tick to render flicker-free at any speed. The
+  // fractional residual is accumulated so the long-run average speed
+  // still equals CONFIG.speed exactly.
+  const desiredStep = CONFIG.speed * frameDt;
+  let snappedStep = desiredStep;
+  if (CONFIG.cameraPixelSnap) {
+    const fbHeight = (renderer.domElement && renderer.domElement.height) || 1080;
+    const pixelWu  = (1000 / Math.max(CONFIG.viewZoom, 1e-3)) / fbHeight;
+    const total    = desiredStep + (tick._snapResidual || 0);
+    const wholePx  = Math.round(total / pixelWu);
+    snappedStep    = wholePx * pixelWu;
+    tick._snapResidual = total - snappedStep;
+  } else {
+    tick._snapResidual = 0;
+  }
+  WORLD.cameraX += snappedStep;
   const worldLoop = SIM.WORLD_LOOP;
   if (Number.isFinite(worldLoop) && WORLD.cameraX >= worldLoop) WORLD.cameraX -= worldLoop;
   rebuildLaneData();
   mat.uniforms.uCameraX.value     = WORLD.cameraX;
   mat.uniforms.uLaneOriginX.value = WORLD.laneOriginSeg * CONFIG.segW;
   // World-units travelled this frame. Used by tick AA's optional
-  // motion-blur slider.
-  mat.uniforms.uMotionStep.value  = Math.abs(CONFIG.speed) * frameDt;
+  // motion-blur slider — uses the actual snapped step, not the desired
+  // one, so the motion blur matches what was rendered.
+  mat.uniforms.uMotionStep.value  = Math.abs(snappedStep);
 
   renderer.render(scene, camera);
   // Throttled minimap playhead update (~10 Hz).
