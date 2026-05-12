@@ -1,7 +1,7 @@
 {
-  "speed": 10000,
-  "viewZoom": 0.6,
-  "segW": 3000,
+  "speed": 0,
+  "viewZoom": 1.14,
+  "segW": 1500,
   "laneSpace": 180,
   "railWidth": 90,
   "railSoft": 0,
@@ -56,10 +56,9 @@
   "convergenceTaper": 0,
   "colorMergeTaper": 0,
   "colorMergeSoftness": 0,
-  "mergeTintColor": "#f1efe8",
+  "mergeTintColor": "#C9C6BC",
   "trunkOnTop": false,
   "mergeAlphaFade": 1,
-  "bendSpread": 0,
   "minimapDrawMode": false,
   "userEvents": [],
   "drawInitLanes": "0 3 6",
@@ -80,7 +79,7 @@
   "deployBrandTop": "#4F8669",
   "deployBrandMid": "#D8AB56",
   "deployBrandBot": "#E9C6C5",
-  "exportFrames": 240,
-  "exportFps": 60,
+  "exportFrames": 120,
+  "exportFps": 30,
   "modulators": []
 }

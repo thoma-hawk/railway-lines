@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Deploy comp</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: #1a1a1a;
+      color: #aaa;
+      font: 12px ui-monospace, SF Mono, monospace;
+      padding: 16px;
+    }
+    .stage { width: 100%; max-width: 1280px; margin: 0 auto 16px; }
+    .stage-frame {
+      position: relative;
+      width: 100%;
+      padding-bottom: 56.25%;
+      background: #F1EFE8;
+      box-shadow: 0 4px 40px rgba(0,0,0,0.5);
+      overflow: hidden;
+    }
+    .stage-frame svg {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      display: block;
+    }
+    .controls {
+      max-width: 1280px; margin: 0 auto;
+      display: flex; gap: 12px; align-items: center;
+    }
+    button {
+      background: #333; color: #ddd; border: 1px solid #555;
+      padding: 6px 12px; border-radius: 3px; cursor: pointer;
+      font: inherit;
+    }
+    button:hover { background: #444; }
+    button.active { background: #5a7; color: #fff; border-color: #6c8; }
+    label { display: flex; gap: 6px; align-items: center; }
+    input[type="range"] { width: 140px; }
+    .frame-row {
+      max-width: 1280px; margin: 0 auto 8px;
+      display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    }
+    .frame-row .group {
+      display: flex; gap: 4px; align-items: center;
+      padding: 4px 8px; border: 1px solid #333; border-radius: 4px;
+    }
+    .frame-row button { padding: 5px 10px; }
+  </style>
+</head>
+<body>
+  <!--
+    LAYOUT MODEL (back to static positioning, with flow from column pattern)
+    ════════════════════════════════════════════════════════════════════════
+    - Rails are STATIC at fixed canvas y (360/540/720). Entry is via
+      stroke-dashoffset (right-to-left reveal).
+    - Dotted lines render ABOVE the rails (later in document order so they
+      paint on top — matches the reference screenshot).
+    - Text labels are STATIC at fixed canvas (x≈912, y per rail). They
+      animate in via fade + typewriter at scheduled times — never translate.
+    - The continuous flow feel comes from the column-pattern background
+      drifting leftward forever (same as before) plus the gradient stops
+      sweeping inside each rail body.
+    - Merge: top + bot rail `d` attrs are recomputed live as the merge
+      progresses — rails curve toward y=540 with overlap visible (rails
+      have opacity < 1 so the merge zone shows blending).
+  -->
+  <div class="stage">
+   <div class="stage-frame">
+    <svg viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <pattern id="col-pattern" x="60" y="0" width="300" height="1080" patternUnits="userSpaceOnUse">
+          <line x1="0" y1="0" x2="0" y2="1080" stroke="#E5E2D9" stroke-width="1"/>
+        </pattern>
+
+        <!-- ──────────────────────────────────────────────────────────────
+             ZOETROPE TICK PATTERN — vertical bg-colored stripes that paint
+             ON TOP of the rails, like the ticks/gaps in the main app.
+             Tweak these values directly to change appearance:
+               pattern width  = tick spacing (distance between ticks)
+               rect    width  = tick width   (thickness of each tick)
+               rect    fill   = tick color   (#F1EFE8 = bg / "gap" look)
+             ────────────────────────────────────────────────────────────── -->
+        <pattern id="tick-pattern" x="0" y="0" width="100" height="540" patternUnits="userSpaceOnUse">
+          <rect x="0" y="0" width="4" height="540" fill="#F1EFE8"/>
+        </pattern>
+
+        <!-- Per-rail gradients. Two stops each — `a` (left side) and `b`
+             (right side). The timeline tweens both their offsets and
+             stop-colors over time to drive the gray→brand→blue→pale
+             color story. Ranges are in canvas user-space. -->
+        <!-- Initial state: BOTH stops gray, so the rail enters as a solid
+             grey band. Timeline tweens stop-b's color + offset to sweep
+             the brand color in from the right; stop-a then catches up to
+             solidify the rail at the brand color. Same trick repeats for
+             the blue wave and the pale wash. -->
+        <linearGradient id="grad-top" gradientUnits="userSpaceOnUse" x1="0" y1="360" x2="1920" y2="360">
+          <stop id="stop-top-a" offset="0" stop-color="#9D9D9D"/>
+          <stop id="stop-top-b" offset="1" stop-color="#9D9D9D"/>
+        </linearGradient>
+        <linearGradient id="grad-mid" gradientUnits="userSpaceOnUse" x1="0" y1="540" x2="1920" y2="540">
+          <stop id="stop-mid-a" offset="0" stop-color="#9D9D9D"/>
+          <stop id="stop-mid-b" offset="1" stop-color="#9D9D9D"/>
+        </linearGradient>
+        <linearGradient id="grad-bot" gradientUnits="userSpaceOnUse" x1="0" y1="720" x2="1920" y2="720">
+          <stop id="stop-bot-a" offset="0" stop-color="#9D9D9D"/>
+          <stop id="stop-bot-b" offset="1" stop-color="#9D9D9D"/>
+        </linearGradient>
+
+        <!-- Reveal clip-rects for the dotted lines. Each starts off-canvas
+             right (x=1920); timeline tweens x → 0 to reveal the line
+             right-to-left. Width is wider than canvas so the dotted line
+             extends past the right edge once revealed. -->
+        <clipPath id="clip-dash-mid"><rect id="dash-mid-clip" x="1920" y="0" width="2600" height="1080"/></clipPath>
+        <clipPath id="clip-dash-top"><rect id="dash-top-clip" x="1920" y="0" width="2600" height="1080"/></clipPath>
+        <clipPath id="clip-dash-bot"><rect id="dash-bot-clip" x="1920" y="0" width="2600" height="1080"/></clipPath>
+      </defs>
+
+      <!-- Background -->
+      <rect width="1920" height="1080" fill="#F1EFE8"/>
+      <rect id="col-bg" width="1920" height="1080" fill="url(#col-pattern)" pointer-events="none"/>
+
+      <!-- ── RAILS (rendered first, dotted lines paint on top) ────────── -->
+      <path id="rail-mid" d="M2400 540 L0 540"
+            stroke="url(#grad-mid)" stroke-width="180" fill="none"
+            opacity="0"
+            pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
+      <path id="rail-top" d="M2400 360 L0 360"
+            stroke="url(#grad-top)" stroke-width="180" fill="none"
+            opacity="0"
+            pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
+      <path id="rail-bot" d="M2400 720 L0 720"
+            stroke="url(#grad-bot)" stroke-width="180" fill="none"
+            opacity="0"
+            pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
+
+      <!-- ── SLEEPERS (internal tick pattern that flows leftward — gives
+              the rails the procedural-mode "moving along x axis" feel).
+              Same `d` as each rail, with a periodic stroke-dasharray
+              instead of a continuous stroke. Initially hidden; faded in
+              around the merge to make the collapse motion legible. ── -->
+      <path id="sleepers-mid" d="M2400 540 L0 540"
+            stroke="rgba(0,0,0,0.12)" stroke-width="180" fill="none"
+            stroke-dasharray="4 96" stroke-dashoffset="0"
+            opacity="0" pointer-events="none"/>
+      <path id="sleepers-top" d="M2400 360 L0 360"
+            stroke="rgba(0,0,0,0.12)" stroke-width="180" fill="none"
+            stroke-dasharray="4 96" stroke-dashoffset="0"
+            opacity="0" pointer-events="none"/>
+      <path id="sleepers-bot" d="M2400 720 L0 720"
+            stroke="rgba(0,0,0,0.12)" stroke-width="180" fill="none"
+            stroke-dasharray="4 96" stroke-dashoffset="0"
+            opacity="0" pointer-events="none"/>
+
+      <!-- ── ZOETROPE TICK OVERLAY — vertical bg-colored stripes drawn
+              over the rail-stack region (y=270 to y=810). Tick spacing,
+              width, and color are controlled by #tick-pattern in <defs>. -->
+      <rect id="tick-overlay" x="0" y="270" width="1920" height="540"
+            fill="url(#tick-pattern)" pointer-events="none"/>
+
+      <!-- ── DOTTED LINES (above rails in z-order) ───────────────────── -->
+      <path id="dash-mid" d="M-300 540 L2400 540"
+            stroke="#000" stroke-width="1.27"
+            stroke-dasharray="15.29 15.29"
+            clip-path="url(#clip-dash-mid)"/>
+      <path id="dash-top" d="M-300 360 L2400 360"
+            stroke="#000" stroke-width="1.27"
+            stroke-dasharray="15.29 15.29"
+            clip-path="url(#clip-dash-top)"/>
+      <path id="dash-bot" d="M-300 720 L2400 720"
+            stroke="#000" stroke-width="1.27"
+            stroke-dasharray="15.29 15.29"
+            clip-path="url(#clip-dash-bot)"/>
+
+      <!-- ── CONNECTOR LINES (mid → top, mid → bot). Each animates
+               via stroke-dashoffset so it grows outward from the mid.
+               Endpoints have a small gap from each marker (radius 9 +
+               8px space = starts at y=540±17, ends at y=360+17 / 720-17). -->
+      <line id="connector-up"   x1="912" y1="523" x2="912" y2="377"
+            stroke="#000" stroke-width="1.3"
+            stroke-dasharray="146" stroke-dashoffset="146"/>
+      <line id="connector-down" x1="912" y1="557" x2="912" y2="703"
+            stroke="#000" stroke-width="1.3"
+            stroke-dasharray="146" stroke-dashoffset="146"/>
+
+      <!-- ── PER-RAIL LABELS (static canvas positions) ───────────────── -->
+      <!-- Each label has a marker (circle ring + triangle, swapped) and
+           three text variants (Deploying / Configuring / Deployed) toggled
+           by opacity. Text content typewrites in via JS. -->
+
+      <!-- TOP: frontend -->
+      <g id="label-top" opacity="0">
+        <g id="marker-top">
+          <circle id="marker-top-ring" cx="912" cy="360" r="9" fill="none" stroke="#000" stroke-width="3.5"/>
+          <path id="marker-top-tri" d="M902 368 L922 368 L912 350 Z" fill="none" stroke="#000" stroke-width="3.5" opacity="0"/>
+        </g>
+        <g id="text-top-deploying" opacity="1">
+          <text id="text-top-deploying-l1" x="933" y="354"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Deploying</text>
+          <text id="text-top-deploying-l2" x="933" y="378"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">frontend</text>
+        </g>
+        <g id="text-top-config" opacity="0">
+          <text id="text-top-config-l1" x="933" y="354"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Configuring…</text>
+          <text id="text-top-config-l2" x="933" y="378"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">frontend</text>
+        </g>
+        <g id="text-top-deployed" opacity="0">
+          <text id="text-top-deployed-l1" x="933" y="354"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Deployed</text>
+          <text id="text-top-deployed-l2" x="933" y="378"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">frontend</text>
+        </g>
+      </g>
+
+      <!-- MID: backend from github -->
+      <g id="label-mid" opacity="0">
+        <g id="marker-mid">
+          <circle id="marker-mid-ring" cx="912" cy="540" r="9" fill="none" stroke="#000" stroke-width="3.5"/>
+          <path id="marker-mid-tri" d="M902 548 L922 548 L912 530 Z" fill="none" stroke="#000" stroke-width="3.5" opacity="0"/>
+        </g>
+        <g id="text-mid-deploying" opacity="1">
+          <text id="text-mid-deploying-l1" x="933" y="534"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Deploying backend</text>
+          <text id="text-mid-deploying-l2" x="933" y="558"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">from github</text>
+        </g>
+        <g id="text-mid-config" opacity="0">
+          <text id="text-mid-config-l1" x="933" y="534"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Configuring…</text>
+          <text id="text-mid-config-l2" x="933" y="558"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">backend from github</text>
+        </g>
+        <g id="text-mid-deployed" opacity="0">
+          <text id="text-mid-deployed-l1" x="933" y="534"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Deployed</text>
+          <text id="text-mid-deployed-l2" x="933" y="558"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">backend from github</text>
+        </g>
+      </g>
+
+      <!-- BOT: postgres docker image -->
+      <g id="label-bot" opacity="0">
+        <g id="marker-bot">
+          <circle id="marker-bot-ring" cx="912" cy="720" r="9" fill="none" stroke="#000" stroke-width="3.5"/>
+          <path id="marker-bot-tri" d="M902 728 L922 728 L912 710 Z" fill="none" stroke="#000" stroke-width="3.5" opacity="0"/>
+        </g>
+        <g id="text-bot-deploying" opacity="1">
+          <text id="text-bot-deploying-l1" x="933" y="714"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Deploying postgres</text>
+          <text id="text-bot-deploying-l2" x="933" y="738"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">docker image</text>
+        </g>
+        <g id="text-bot-config" opacity="0">
+          <text id="text-bot-config-l1" x="933" y="714"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Configuring…</text>
+          <text id="text-bot-config-l2" x="933" y="738"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">postgres docker image</text>
+        </g>
+        <g id="text-bot-deployed" opacity="0">
+          <text id="text-bot-deployed-l1" x="933" y="714"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">Deployed</text>
+          <text id="text-bot-deployed-l2" x="933" y="738"
+                font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">postgres docker image</text>
+        </g>
+      </g>
+
+      <!-- ── SUMMARY (frame 9-10): single Deployed + bullet list ────── -->
+      <g id="summary" opacity="0">
+        <line x1="912" y1="554" x2="912" y2="900" stroke="#000" stroke-width="1.3"/>
+        <circle cx="912" cy="922" r="4" fill="#000"/>
+        <text id="text-sum-1" x="930" y="928"
+              font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">frontend</text>
+        <circle cx="912" cy="958" r="4" fill="#000"/>
+        <text id="text-sum-2" x="930" y="964"
+              font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">github backend</text>
+        <circle cx="912" cy="994" r="4" fill="#000"/>
+        <text id="text-sum-3" x="930" y="1000"
+              font-family="ui-monospace, SF Mono, monospace" font-size="20" fill="#000">postgres docker image</text>
+      </g>
+    </svg>
+   </div>
+  </div>
+
+  <!-- Per-frame playback: click a number to play just the segment leading
+       INTO that frame (i.e. from the previous frame's time to this frame's
+       time). Right-click (or shift-click) jumps without playing. -->
+  <div class="frame-row">
+    <div class="group">
+      <span>Play frame</span>
+      <button data-frame="1">1</button>
+      <button data-frame="2">2</button>
+      <button data-frame="3">3</button>
+      <button data-frame="4">4</button>
+      <button data-frame="5">5</button>
+      <button data-frame="6">6</button>
+      <button data-frame="7">7</button>
+      <button data-frame="8">8</button>
+      <button data-frame="9">9</button>
+      <button data-frame="10">10</button>
+    </div>
+    <div class="group">
+      <button id="play-segment" title="Replay the segment INTO the active frame">▶ Replay segment</button>
+      <button id="jump-frame" title="Jump to frame's start time without playing">⇥ Jump</button>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="replay">Replay full</button>
+    <label>Speed
+      <input id="speed" type="range" min="0.1" max="2" step="0.05" value="1"/>
+    </label>
+    <span id="t-readout">t=0.00s</span>
+    <span style="margin-left:auto;">
+      <a href="compare.html" style="color:#88a;">→ compare with figma</a>
+    </span>
+  </div>
+
+  <!-- Export: rasterize each frame of the timeline to PNG and bundle as
+       a zip. Open the zip and feed the sequence to ffmpeg (or import to
+       AE / Cavalry) to produce a video. -->
+  <div class="frame-row" style="margin-top:8px;">
+    <div class="group">
+      <span>Export</span>
+      <label>FPS <input id="export-fps" type="number" min="1" max="120" step="1" value="30" style="width:56px;"/></label>
+      <label>W <input id="export-w" type="number" min="320" max="3840" step="1" value="1920" style="width:64px;"/></label>
+      <label>H <input id="export-h" type="number" min="240" max="2160" step="1" value="1080" style="width:64px;"/></label>
+      <button id="export-btn">Export PNG sequence (.zip)</button>
+      <span id="export-progress" style="color:#888; margin-left:8px;">—</span>
+    </div>
+  </div>
+
+  <script src="vendor/gsap.min.js"></script>
+  <script src="vendor/jszip.min.js"></script>
+  <script src="timeline.js"></script>
+  <script src="export.js"></script>
+  <script>
+  // ── Per-frame controls ─────────────────────────────────────────────────
+  // Click frame N: plays from FRAME_TIMES[N-1] (or 0) to FRAME_TIMES[N].
+  // Holding shift while clicking just jumps without playing.
+  // Replay-segment / Jump buttons act on whichever frame was last selected.
+  const frameBtns = [...document.querySelectorAll('.frame-row button[data-frame]')];
+  const playSeg   = document.getElementById('play-segment');
+  const jumpBtn   = document.getElementById('jump-frame');
+  let activeFrame = null;
+
+  function segmentRange(n) {
+    const start = n > 1 ? window.FRAME_TIMES[n - 1] : 0;
+    const end   = window.FRAME_TIMES[n];
+    return [start, end];
+  }
+  function setActive(n) {
+    activeFrame = n;
+    frameBtns.forEach(b => b.classList.toggle('active',
+      parseInt(b.dataset.frame, 10) === n));
+  }
+  function playFrame(n) {
+    setActive(n);
+    const [a, b] = segmentRange(n);
+    tl.repeat(0);
+    tl.tweenFromTo(a, b);
+  }
+  function jumpFrame(n) {
+    setActive(n);
+    tl.pause();
+    tl.seek(window.FRAME_TIMES[n]);
+  }
+
+  frameBtns.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const n = parseInt(btn.dataset.frame, 10);
+      if (e.shiftKey) jumpFrame(n);
+      else            playFrame(n);
+    });
+  });
+
+  playSeg.addEventListener('click', () => { if (activeFrame != null) playFrame(activeFrame); });
+  jumpBtn.addEventListener('click',  () => { if (activeFrame != null) jumpFrame(activeFrame); });
+
+  // Auto-play full timeline on load.
+  tl.play();
+  </script>
+</body>
+</html>

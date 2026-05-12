@@ -40,6 +40,16 @@ const SIM = (() => {
       { seg: 23, type: 'MERGE', from: 2, to: 3 },
       { seg: 23, type: 'MERGE', from: 4, to: 3 },
     ],
+    parallel: [
+      { seg: 0, type: 'INIT', from: '2 3 4' },
+    ],
+    merge1: [
+      { seg: 0,  type: 'INIT',  from: 3 },
+      { seg: 4,  type: 'SPLIT', from: 3, to: 2 },
+      { seg: 4,  type: 'SPLIT', from: 3, to: 4 },
+      { seg: 12, type: 'MERGE', from: 2, to: 3 },
+      { seg: 12, type: 'MERGE', from: 4, to: 3 },
+    ],
   };
 
   let ACTIVE = SCRIPTS.v1;
@@ -305,8 +315,14 @@ const SIM = (() => {
       }
     }
 
-    // MERGEs: relocate a rail at `from` to `to`. The rail keeps its ID and
-    // ends up overlapping whatever rail was already at `to`.
+    // MERGEs: move a rail at `from` to `to`. Two modes:
+    //   - Absorb: if another rail already ends at `to`, the merging rail
+    //     is consumed (removed from endRails). Used by scripted/draw
+    //     loops so repeated merges into the trunk don't accumulate rail
+    //     IDs and eventually hit the rail-cap.
+    //   - Relocate: if `to` has no other rail, the merging rail keeps
+    //     its ID and just slides to the new lane. Used by convergence
+    //     patterns that ping-pong rails between lanes.
     for (const ev of events) {
       if (String(ev.type).toUpperCase() !== 'MERGE') continue;
       const la = parseFloat(ev.from);
@@ -316,8 +332,14 @@ const SIM = (() => {
       if (!rail) continue;
       conns.push({ id: rail.id, y1: la, y2: lb });
       handled.add(rail.id);
-      const er = endRails.find(r => r.id === rail.id);
-      if (er) er.lane = lb;
+      const erIdx = endRails.findIndex(r => r.id === rail.id);
+      if (erIdx < 0) continue;
+      const otherAtDest = endRails.some((r, i) => i !== erIdx && r.lane === lb);
+      if (otherAtDest) {
+        endRails.splice(erIdx, 1);            // absorbed
+      } else {
+        endRails[erIdx].lane = lb;            // relocated
+      }
     }
 
     // Pass-through — every rail without a custom conn goes straight.

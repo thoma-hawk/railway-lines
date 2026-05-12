@@ -167,6 +167,28 @@
   <main class="stage">
     <canvas id="scene"></canvas>
 
+    <!-- Deploy overlay: SVG layer over the canvas. deploy-overlay.js builds
+         3 horizontal gradient rails inside #deploy-overlay-content, sized to
+         match the engine's lanes 3/4/5, then runs a GSAP loop that animates
+         the gradient stops (the figma frame-5 sweep). mix-blend-mode: multiply
+         lets the engine's rail motion (sleepers, ticks) show through. -->
+    <svg id="deploy-overlay" preserveAspectRatio="none"
+         style="position:absolute; inset:0; width:100%; height:100%;
+                pointer-events:none; mix-blend-mode:multiply; display:none;">
+      <defs id="deploy-overlay-defs"></defs>
+      <g id="deploy-overlay-content"></g>
+    </svg>
+
+    <!-- Toggle for the overlay. Floating, doesn't touch the existing panel. -->
+    <button id="deploy-overlay-toggle"
+            style="position:fixed; bottom:12px; left:12px; z-index:20;
+                   background:rgba(32,90,180,0.85); color:#fff;
+                   border:none; border-radius:4px; padding:6px 12px;
+                   font:11px ui-monospace, monospace; letter-spacing:0.04em;
+                   cursor:pointer;">
+      Deploy overlay: OFF
+    </button>
+
     <aside id="panel">
       <header>
         <h1>Railway (minimal)</h1>
@@ -206,6 +228,7 @@
             <option value="phasing">Phasing (one rail, two pill voices)</option>
             <option value="convergence">Convergence (rail width)</option>
             <option value="draw">Draw (custom topology)</option>
+            <option value="deploy">Deploy (figma overlay loop)</option>
           </select>
         </label>
         <div id="scripted-only">
@@ -213,6 +236,8 @@
             <select data-k="simScript">
               <option value="v1">v1 — default (3-lane splits)</option>
               <option value="v5">v5 — 5-lane splits</option>
+              <option value="parallel">parallel — 3 lanes (no splits)</option>
+              <option value="merge1">merge1 — single split/merge cycle</option>
             </select>
           </label>
         </div>
@@ -250,11 +275,43 @@
         <div id="taper-only" class="sub-block">
           <label>Merge taper <input type="range" min="0" max="1" step="0.01" data-k="convergenceTaper"><span data-v="convergenceTaper"></span></label>
           <div class="preset-hint">Narrows rails through the merged phase of the loop (0 = constant width, 1 = ≈15% width at merge).</div>
+          <label>Colour blend <input type="range" min="0" max="1" step="0.01" data-k="colorMergeTaper"><span data-v="colorMergeTaper"></span></label>
+          <div class="preset-hint">Cross-fades non-trunk rails toward the trunk's colour as they approach the merge. 0 = stays green/yellow distinct; 1 = greens fully blend to yellow at the junction.</div>
+          <label>Blend softness <input type="range" min="0" max="1" step="0.01" data-k="colorMergeSoftness"><span data-v="colorMergeSoftness"></span></label>
+          <div class="preset-hint">Spreads the colour transition across neighbouring segments. 0 = blend only inside the bend; 1 = blend bleeds ≈6 segments to either side, so colours start fusing well before the junction.</div>
+          <label>Merge tint <input type="color" data-k="mergeTintColor"></label>
+          <div class="preset-hint">Shared shade every rail washes toward at the junction. Pick something close to the background (default #C9C6BC) so rails dissolve into a pale ribbon at the merge instead of one colour visibly overtaking another.</div>
+          <label><input type="checkbox" data-k="trunkOnTop"> Trunk on top</label>
+          <div class="preset-hint">When on, rail 0 (the always-present trunk) composites over the split rails — greens recede behind the yellow at the merge instead of covering it.</div>
+          <label>Branch fade <input type="range" min="0" max="1" step="0.01" data-k="mergeAlphaFade"><span data-v="mergeAlphaFade"></span></label>
+          <div class="preset-hint">Fades non-trunk rails to transparent at the junction so they "grow out of" the trunk gradually instead of popping in as a sharp wedge. Combine with Blend softness to spread the fade across multiple segments.</div>
+          <label>Bend spread <input type="range" min="0" max="1" step="0.01" data-k="bendSpread"><span data-v="bendSpread"></span></label>
+          <div class="preset-hint">Pulls non-trunk rails toward the trunk's lane by the softened phase, so the visible bend stretches across many segments instead of being confined to the one bend segment. Raise Blend softness to widen the zone the pull operates over.</div>
         </div>
         <div id="draw-only" class="sub-block">
           <div class="sub-head">Draw</div>
           <label>Init lanes <input type="text" data-k="drawInitLanes" placeholder="e.g. 0 3 6" style="width:120px"></label>
           <div class="preset-hint">Drag in the topology to add a <b>MERGE</b> (relocate an existing rail). Hold ⇧&nbsp;Shift while dragging to add a <b>SPLIT</b> (spawn a new rail). The loop length is set by <i>Loop segs</i>.</div>
+        </div>
+        <div id="deploy-only" class="sub-block">
+          <div class="sub-head">Deploy overlay loop</div>
+          <label>Sweep duration <input type="range" min="0.3" max="6" step="0.05" data-k="deploySweepDur"><span data-v="deploySweepDur"></span></label>
+          <label>Sweep depth <input type="range" min="0" max="1" step="0.01" data-k="deploySweepDepth"><span data-v="deploySweepDepth"></span></label>
+          <label>Hold (yoyo pause) <input type="range" min="0" max="3" step="0.05" data-k="deployHold"><span data-v="deployHold"></span></label>
+          <label>Overlay opacity <input type="range" min="0" max="1" step="0.01" data-k="deployOpacity"><span data-v="deployOpacity"></span></label>
+          <label>Blend mode
+            <select data-k="deployBlend">
+              <option value="multiply">Multiply (tint engine)</option>
+              <option value="normal">Normal (replace engine)</option>
+              <option value="screen">Screen (lighten)</option>
+              <option value="overlay">Overlay</option>
+              <option value="soft-light">Soft light</option>
+            </select>
+          </label>
+          <label>Brand top <input type="color" data-k="deployBrandTop"></label>
+          <label>Brand mid <input type="color" data-k="deployBrandMid"></label>
+          <label>Brand bot <input type="color" data-k="deployBrandBot"></label>
+          <div class="preset-hint">Sweeps the brand color stop from offset 1.0 → <i>Sweep depth</i>, holds, then yoyos back. Engine sim runs underneath; switch the underlying topology by changing <i>Mode</i> back temporarily.</div>
         </div>
         <div id="phasing-only" class="sub-block">
           <div class="sub-head">Phasing pills</div>
@@ -312,12 +369,37 @@
         <label>Rail opacity <input type="range" min="0" max="1" step="0.01" data-k="railOpacity"><span data-v="railOpacity"></span></label>
 
         <div class="sub-block">
+          <div class="sub-head">Profile</div>
+          <label>Mode
+            <select data-k="railProfile">
+              <option value="0">Gaussian (railSoft/Sigma)</option>
+              <option value="figma">Figma 6-stop</option>
+            </select>
+          </label>
+          <label>Core (saturated extent)
+            <input type="range" min="0" max="0.95" step="0.01" data-k="profileCore"><span data-v="profileCore"></span>
+          </label>
+          <label>Shoulder (pastel extent)
+            <input type="range" min="0.05" max="1" step="0.01" data-k="profileShoulder"><span data-v="profileShoulder"></span>
+          </label>
+          <label>Edge color <input type="color" data-k="railEdgeColor"></label>
+          <div class="sub-head" style="margin-top:6px;">Shoulder colors (per rail)</div>
+          <div class="lane-color-row" id="shoulder-color-row"></div>
+          <div class="preset-hint">Figma mode replaces the Gaussian halo with a 6-stop vertical gradient (transparent edge → pastel shoulder → saturated core, mirrored). Core / Shoulder are normalized distances from rail centre (0=centre, 1=edge).</div>
+        </div>
+
+        <div class="sub-block">
           <div class="sub-head">Ticks (zoetrope)</div>
           <label>Amount <input type="range" min="0" max="1" step="0.01" data-k="tickAmount"><span data-v="tickAmount"></span></label>
           <label>Spacing <input type="range" min="20" max="2000" step="1" data-k="tickSpacing"><span data-v="tickSpacing"></span></label>
           <label>Width <input type="range" min="2" max="500" step="1" data-k="tickWidth"><span data-v="tickWidth"></span></label>
+          <label>Colour <input type="color" data-k="tickColor"></label>
+          <label>Motion blur <input type="range" min="0" max="1" step="0.01" data-k="tickMotionBlur"><span data-v="tickMotionBlur"></span></label>
+          <div class="preset-hint">0 = crisp ticks (may strobe off the freeze speed at high scroll rates); 1 = ticks widen to cover one frame's camera travel and become soft non-flicker bars. Use "Snap to freeze speed" below for the crispest result.</div>
           <button class="preset-btn" id="snap-freeze">Snap to freeze speed</button>
           <div class="preset-hint" id="freeze-hint">freeze ≈ — wu/s @ 60 Hz</div>
+          <label>Target FPS <input type="range" min="0" max="120" step="1" data-k="targetFps"><span data-v="targetFps"></span></label>
+          <div class="preset-hint">0 = use the display's detected refresh rate (auto). Any positive value locks the render loop to that fps via frame-skipping — useful on 120 Hz / ProMotion displays where you want deterministic tick freeze at 60 fps. Snap-to-freeze multiplies by this rate.</div>
         </div>
 
         <div class="sub-block">
@@ -327,6 +409,20 @@
           <label>Density <input type="range" min="0" max="1" step="0.01" data-k="inkTrapDensity"><span data-v="inkTrapDensity"></span></label>
           <label>Width <input type="range" min="20" max="800" step="2" data-k="inkTrapWidth"><span data-v="inkTrapWidth"></span></label>
           <label>Direction <input type="range" min="0" max="1" step="0.01" data-k="inkTrapDirection"><span data-v="inkTrapDirection"></span></label>
+        </div>
+
+        <div class="sub-block">
+          <div class="sub-head">Bursts</div>
+          <label>Amount <input type="range" min="0" max="1" step="0.01" data-k="burstAmount"><span data-v="burstAmount"></span></label>
+          <label>Density <input type="range" min="0" max="1" step="0.01" data-k="burstDensity"><span data-v="burstDensity"></span></label>
+          <label>Cell <input type="range" min="50" max="5000" step="10" data-k="burstCell"><span data-v="burstCell"></span></label>
+          <label>Length min <input type="range" min="0.05" max="1" step="0.01" data-k="burstLenMin"><span data-v="burstLenMin"></span></label>
+          <label>Length max <input type="range" min="0.05" max="1" step="0.01" data-k="burstLenMax"><span data-v="burstLenMax"></span></label>
+          <label>X velocity <input type="range" min="0" max="5000" step="10" data-k="burstSpeed"><span data-v="burstSpeed"></span></label>
+          <label>Rail spread <input type="range" min="0" max="1" step="0.01" data-k="burstRailSpread"><span data-v="burstRailSpread"></span></label>
+          <label>Colour <input type="color" data-k="burstColor"></label>
+          <label><input type="checkbox" data-k="burstLockToRail"> Lock to rail flow (mode B)</label>
+          <div class="preset-hint">Painterly slugs of colour scrolling along each rail. Each rail picks its own bursts and drifts at its own velocity (Rail spread = 0 → all rails identical, 1 → rails desync hard). Lock to rail flow swaps to mode B: bursts pinned to world-X with per-rail parallax instead.</div>
         </div>
       </section>
 
@@ -368,10 +464,15 @@
 
   <!-- Three.js UMD (r150 = last UMD release) so file:// works. -->
   <script src="https://unpkg.com/three@0.150.0/build/three.min.js"></script>
+  <!-- Stats.js FPS panel — global `Stats` constructor. -->
+  <script src="https://unpkg.com/stats.js@0.17.0/build/stats.min.js"></script>
   <!-- JSZip — used as a fallback when the File System Access API isn't
        available (Firefox / Safari) so the export bundles into one .zip. -->
   <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="sim.js?v=31"></script>
-  <script src="app-three.js?v=31"></script>
+  <script src="sim.js?v=58"></script>
+  <script src="app-three.js?v=58"></script>
+  <!-- Deploy overlay: GSAP-driven gradient sweep on top of the engine. -->
+  <script src="deploy-anim/vendor/gsap.min.js"></script>
+  <script src="deploy-overlay.js"></script>
 </body>
 </html>

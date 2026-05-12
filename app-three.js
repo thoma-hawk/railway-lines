@@ -47,6 +47,24 @@ const CONFIG = {
   railOpacity:  1.0,
   bgColor:      '#f4f3ea',
 
+  // Rail body profile.
+  //   0 = Gaussian halo (default — uses railSoft + railSigma)
+  //   1 = Figma 6-stop vertical gradient (uses laneShoulderColors +
+  //       railEdgeColor below; the body itself has soft transparent
+  //       edges with a pastel shoulder around a saturated core, exactly
+  //       matching figma's <linearGradient> with stops at 0/0.1/0.39/
+  //       0.61/0.9/1.0). railSoft / railSigma are unused in this mode.
+  railProfile:        0,
+  laneShoulderColors: defaultLaneColors(MAX_LANE_BUCKETS),
+  railEdgeColor:      '#C9C6BC',
+  // Figma profile thresholds (only meaningful when railProfile === 'figma').
+  // Both in normalized 0..1 of the rail's half-thickness (du), 0 = center,
+  // 1 = body edge. Defaults match the figma "colour exploration 46" stops:
+  //   profileCore     = 0.22  ↔  figma stops at offset 0.39 / 0.61
+  //   profileShoulder = 0.80  ↔  figma stops at offset 0.10 / 0.90
+  profileCore:     0.22,
+  profileShoulder: 0.80,
+
   // Per-lane hue blending — each rail (owner-lane group) gets a distinct
   // color and is composited onto the running destination using the chosen
   // blend mode. Layering shows up where rails overlap (split/merge zones).
@@ -69,6 +87,13 @@ const CONFIG = {
   tickAmount:    0,        // 0 = no gaps, 1 = full clear gap at each tick
   tickSpacing:   100,      // world units between ticks
   tickWidth:     30,       // gap width in world units (along the rail)
+  tickColor:     '#F1EFE8',// colour painted into the tick gap (defaults to
+                           // bg so existing presets keep their look — change
+                           // this to make ticks read as visible markers).
+  tickMotionBlur: 0,       // 0 = crisp ticks (may strobe off-freeze at high
+                           // speed); 1 = full motion-blur (ticks widen to
+                           // cover one frame of camera travel — non-flicker
+                           // but soft fat bars).
 
   // ── Ink traps — periodic asymmetric hills along each rail ────────────
   // Per-rail random pattern (hash of segment idx × lane Y). Each trap
@@ -78,6 +103,24 @@ const CONFIG = {
   inkTrapDensity:   0.45,     // 0..1 — probability a candidate slot fires
   inkTrapWidth:     368,      // hill half-width (world units)
   inkTrapDirection: 0.28,     // 0 = all upward, 1 = all downward, 0.5 = mixed
+
+  // ── Bursts ────────────────────────────────────────────────────────────────
+  // Finite painterly slugs of saturated colour layered on top of the desat
+  // rail base. Each rail picks its own bursts (rid is part of the hash seed)
+  // and scrolls them at its own velocity, so the rows desync in true Ikeda-
+  // data-stream fashion. The X-envelope reuses figmaProfileAlpha so a burst
+  // looks isotropic — same shoulder fall-off along X as the rail has along Y.
+  burstAmount:      0,        // 0 = off, 1 = full saturation when a burst hits
+  burstDensity:     0.5,      // 0..1 — fraction of cells that fire
+  burstCell:        600,      // average cell width in world units
+  burstLenMin:      0.25,     // shortest burst as fraction of cell (0..1)
+  burstLenMax:      0.85,     // longest burst as fraction of cell (0..1)
+  burstSpeed:       800,      // burst x-velocity in world units / second
+  burstRailSpread:  0.6,      // 0 = all rails same speed, 1 = ±100% jitter per rail
+  burstColor:       '#DE4D0E',// accent colour painted into the rail body
+  burstLockToRail:  false,    // false = mode A (bursts drift at own velocity),
+                              //  true = mode B (bursts pinned to rail flow,
+                              //  per-rail X-scale acts as a parallax)
 
   // ── Phasing pills — single-group sleepers along a straight rail.
   // The simulator emits one rail forever; the renderer paints repeating
@@ -102,6 +145,32 @@ const CONFIG = {
   // (rails at 0/3/6) → 0, fully merged (rails close together) → 1.
   // 0 = constant width; 1 = rail vanishes at the merge.
   convergenceTaper: 0,
+  // 0..1 — fades every rail's color toward `mergeTintColor` by the merge
+  // phase. Matches the figma "ribbon gradient" look where rails wash out
+  // to a shared neutral near the junction, so the seam between rails
+  // disappears instead of the greens visibly snapping in.
+  colorMergeTaper: 0,
+  // 0..1 — softens the colour fade by spatially blurring the phase array
+  // used for it (the width-taper phase is untouched). 0 = fade confined
+  // to the bend segment; 1 = bleeds ±6 segments into the straight sections.
+  colorMergeSoftness: 0,
+  // Target colour every rail washes toward as `colorMergeTaper` rises.
+  // Defaults to the rail edge tone so the fade looks like the figma SVG
+  // (saturated body → pale neutral). Use a colour close to bgColor for the
+  // softest "rails dissolve into the background near the merge" look.
+  mergeTintColor: '#C9C6BC',
+  // When true, rail 0 (the trunk) composites *over* rails 1..N instead of
+  // under them — so greens recede behind the yellow trunk at the merge.
+  trunkOnTop: false,
+  // 0..1 — fades non-trunk rails to transparent as they approach the
+  // merge (peak phaseSoft). Makes split rails "grow out of" the trunk
+  // gradually instead of popping in as a full-alpha wedge at the bend.
+  mergeAlphaFade: 0,
+  // 0..1 — pulls non-trunk rails toward the trunk's lane (Y = 0) by
+  // softened phase, so the visual bend spreads across many segments even
+  // though the script's bend is still confined to one segment. Combine
+  // with Blend softness to widen the "splitting" zone.
+  bendSpread: 0,
 
   // Topology drawing — when true, dragging in the minimap adds a MERGE
   // event to the active scripted-mode (or draw-mode) timeline. Click-to-
@@ -125,9 +194,29 @@ const CONFIG = {
   endChance:    0.05,
   maxTracks:    9,
 
+  // ── Deploy overlay (figma frame-5 brand color sweep) ────────────────────
+  // Active when simMode === 'deploy'. The overlay sits on top of the canvas
+  // (svg#deploy-overlay in index.html) and is driven by deploy-overlay.js.
+  // All these values are read live by that script — change them and the
+  // looping timeline rebuilds.
+  deploySweepDur:   2.0,        // seconds for one sweep
+  deploySweepDepth: 0.14,       // target offset for the brand stop (0..1)
+  deployHold:       0.8,        // pause at end before yoyo back
+  deployOpacity:    0.85,       // overlay group opacity (0..1)
+  deployBlend:      'multiply', // mix-blend-mode string
+  deployBrandTop:   '#4F8669',
+  deployBrandMid:   '#D8AB56',
+  deployBrandBot:   '#E9C6C5',
+
   // PNG sequence export
   exportFrames: 120,
   exportFps:    30,
+
+  // Lock the live render loop to this fps (0 = use detected refresh rate).
+  // On a 120 Hz display, leaving this at 60 gives a perfectly predictable
+  // freeze math (Snap-to-freeze multiplies by exactly 60), and locks the
+  // per-frame camera step to a single deterministic value.
+  targetFps:    60,
 
   // LFO modulators — each entry is { target, sweetSpot, amount, cycle,
   // waveform, enabled, t }. Edit/add via the Modulators panel; persisted
@@ -166,7 +255,14 @@ const WORLD = {
 
 // ── Three.js setup ───────────────────────────────────────────────────────
 const canvas   = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+// preserveDrawingBuffer is required for canvas.toBlob() during PNG export;
+// without it the swap chain has already flipped by the time we read pixels.
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  alpha: false,
+  preserveDrawingBuffer: true,
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setClearColor(new THREE.Color(CONFIG.bgColor));
 
@@ -200,12 +296,40 @@ laneDataTex.needsUpdate = true;
 // the lane-range across all conns at that segment. Used to taper rail
 // width through the loop's spread→merge→spread cycle, regardless of which
 // rail the conn belongs to.
-const segPhaseArray = new Float32Array(WORLD.bufferSegs);
-const PHASE_MAX_RANGE   = 6;   // lanes 0..6 = full spread → phase 0
-const PHASE_MERGE_RANGE = 3;   // any range ≤ this counts as "fully
-                               // merged" → phase 1. Keeps width flat
-                               // across stack/unstack within the merged
-                               // zone (e.g. shuffle pattern).
+const segPhaseArray     = new Float32Array(WORLD.bufferSegs);
+// Triangular-blurred copy of segPhaseArray — only used to drive the
+// colour blend, so soft-blending can spread several segments to either
+// side of a bend while the width-taper stays tight on the bend itself.
+const segPhaseSoftArray = new Float32Array(WORLD.bufferSegs);
+const COLOR_SOFT_MAX_RADIUS = 6; // segments per side at slider = 1
+
+// Auto-normalize the spread→merge phase to the active script's actual
+// rail-range, so phase=0 always means "as spread as this script ever
+// gets" and phase=1 means "as merged as it gets". One-pass scan over the
+// loop, called whenever the simulation topology changes.
+let PHASE_MAX_RANGE = 6;
+let PHASE_MERGE_RANGE = 3;
+function recomputePhaseRange() {
+  const loopLen = Math.max(1, SIM.LOOP_SEGS || 1);
+  let maxR = 0, minR = Infinity;
+  for (let s = 0; s < loopLen; s++) {
+    const conns = SIM.connectionsAt(s);
+    if (!conns.length) continue;
+    let yMin = Infinity, yMax = -Infinity;
+    for (const c of conns) {
+      if (c.y2 < yMin) yMin = c.y2;
+      if (c.y2 > yMax) yMax = c.y2;
+    }
+    const range = yMax - yMin;
+    if (range > maxR) maxR = range;
+    if (range < minR) minR = range;
+  }
+  if (minR === Infinity) { minR = 0; maxR = 6; }
+  if (maxR - minR < 1e-3) maxR = minR + 1;  // avoid div-by-zero on flat scripts
+  PHASE_MAX_RANGE   = maxR;
+  PHASE_MERGE_RANGE = minR;
+}
+recomputePhaseRange();
 
 function rebuildLaneData() {
   const segW = CONFIG.segW;
@@ -237,8 +361,6 @@ function rebuildLaneData() {
       }
     }
     if (yMax === -Infinity) {
-      // No conns at this segment yet — treat as "fully spread" so the
-      // adjacent-row interpolation doesn't mistakenly narrow.
       segPhaseArray[r] = 0;
     } else {
       const range = yMax - yMin;
@@ -247,6 +369,27 @@ function rebuildLaneData() {
         (PHASE_MAX_RANGE - range) / denom));
     }
   }
+
+  // Triangular blur of the phase array → softened phase for colour blend.
+  // Radius = colorMergeSoftness × COLOR_SOFT_MAX_RADIUS (in segments).
+  const softness = Math.max(0, Math.min(1, CONFIG.colorMergeSoftness ?? 0));
+  const radius   = Math.round(softness * COLOR_SOFT_MAX_RADIUS);
+  if (radius === 0) {
+    segPhaseSoftArray.set(segPhaseArray);
+  } else {
+    for (let r = 0; r < WORLD.bufferSegs; r++) {
+      let sum = 0, weight = 0;
+      for (let dr = -radius; dr <= radius; dr++) {
+        const rr = r + dr;
+        if (rr < 0 || rr >= WORLD.bufferSegs) continue;
+        const w = 1 - Math.abs(dr) / (radius + 1);
+        sum    += segPhaseArray[rr] * w;
+        weight += w;
+      }
+      segPhaseSoftArray[r] = weight > 0 ? sum / weight : 0;
+    }
+  }
+
   laneDataTex.needsUpdate = true;
 }
 rebuildLaneData();
@@ -264,12 +407,20 @@ const mat = new THREE.ShaderMaterial({
     uRailOpacity: { value: CONFIG.railOpacity },
     uBgColor:     { value: new THREE.Color(CONFIG.bgColor) },
     uBlendMode:   { value: 0 },
-    uLaneColors:  { value: CONFIG.laneColors.map(h => new THREE.Color(h)) },
+    uLaneColors:    { value: CONFIG.laneColors.map(h => new THREE.Color(h)) },
+    // Figma-profile uniforms (only used when uRailProfile > 0.5)
+    uRailProfile:   { value: CONFIG.railProfile },
+    uLaneShoulder:  { value: CONFIG.laneShoulderColors.map(h => new THREE.Color(h)) },
+    uRailEdgeColor: { value: new THREE.Color(CONFIG.railEdgeColor) },
+    uProfileCore:     { value: CONFIG.profileCore },
+    uProfileShoulder: { value: CONFIG.profileShoulder },
 
     // Ticks (zoetrope)
     uTickAmount:  { value: CONFIG.tickAmount },
     uTickSpacing: { value: CONFIG.tickSpacing },
     uTickWidth:   { value: CONFIG.tickWidth },
+    uTickColor:   { value: new THREE.Color(CONFIG.tickColor || '#F1EFE8') },
+    uTickMotionBlur: { value: CONFIG.tickMotionBlur ?? 0 },
 
     // Ink traps
     uInkTrapAmount:    { value: CONFIG.inkTrapAmount },
@@ -278,10 +429,31 @@ const mat = new THREE.ShaderMaterial({
     uInkTrapWidth:     { value: CONFIG.inkTrapWidth },
     uInkTrapDirection: { value: CONFIG.inkTrapDirection },
 
+    // Per-frame camera motion in world units — used to motion-blur narrow
+    // periodic features (ticks) so they don't strobe when speed is high.
+    uMotionStep:       { value: 0 },
+
+    // Bursts
+    uBurstAmount:      { value: CONFIG.burstAmount ?? 0 },
+    uBurstDensity:     { value: CONFIG.burstDensity ?? 0.5 },
+    uBurstCell:        { value: CONFIG.burstCell ?? 600 },
+    uBurstLenMin:      { value: CONFIG.burstLenMin ?? 0.25 },
+    uBurstLenMax:      { value: CONFIG.burstLenMax ?? 0.85 },
+    uBurstSpeed:       { value: CONFIG.burstSpeed ?? 800 },
+    uBurstRailSpread:  { value: CONFIG.burstRailSpread ?? 0.6 },
+    uBurstColor:       { value: new THREE.Color(CONFIG.burstColor || '#DE4D0E') },
+    uBurstLockToRail:  { value: CONFIG.burstLockToRail ? 1 : 0 },
+
     // Convergence — flag enables per-conn merge tapering.
-    uConvergenceMode:  { value: 0 },
-    uConvergenceTaper: { value: CONFIG.convergenceTaper },
+    uConvergenceMode:    { value: 0 },
+    uConvergenceTaper:   { value: CONFIG.convergenceTaper },
+    uColorMergeTaper:    { value: CONFIG.colorMergeTaper ?? 0 },
+    uMergeTintColor:     { value: new THREE.Color(CONFIG.mergeTintColor || '#C9C6BC') },
+    uTrunkOnTop:         { value: CONFIG.trunkOnTop ? 1 : 0 },
+    uMergeAlphaFade:     { value: CONFIG.mergeAlphaFade ?? 0 },
+    uBendSpread:         { value: CONFIG.bendSpread ?? 0 },
     uSegPhases:        { value: segPhaseArray },
+    uSegPhasesSoft:    { value: segPhaseSoftArray },
 
     // Phasing pills (group A only)
     uPhaseEnabled:    { value: 0 },
@@ -325,11 +497,18 @@ const mat = new THREE.ShaderMaterial({
     // Hard cap on lane buckets — must match MAX_LANE_BUCKETS in app-three.js.
     // Each bucket aggregates one rail's coverage.
     #define MAX_LANE_BUCKETS 9
-    uniform vec3 uLaneColors[MAX_LANE_BUCKETS];
+    uniform vec3  uLaneColors[MAX_LANE_BUCKETS];
+    uniform vec3  uLaneShoulder[MAX_LANE_BUCKETS];
+    uniform vec3  uRailEdgeColor;
+    uniform float uRailProfile;
+    uniform float uProfileCore;
+    uniform float uProfileShoulder;
 
     uniform float uTickAmount;
     uniform float uTickSpacing;
     uniform float uTickWidth;
+    uniform vec3  uTickColor;
+    uniform float uTickMotionBlur;
 
     uniform float uInkTrapAmount;
     uniform float uInkTrapSpacing;
@@ -337,15 +516,33 @@ const mat = new THREE.ShaderMaterial({
     uniform float uInkTrapWidth;
     uniform float uInkTrapDirection;
 
+    // Bursts
+    uniform float uBurstAmount;
+    uniform float uBurstDensity;
+    uniform float uBurstCell;
+    uniform float uBurstLenMin;
+    uniform float uBurstLenMax;
+    uniform float uBurstSpeed;
+    uniform float uBurstRailSpread;
+    uniform vec3  uBurstColor;
+    uniform float uBurstLockToRail;
+    uniform float uMotionStep;
+
     uniform float uPhaseEnabled;
     uniform float uPhaseSpacing;
     uniform float uPhaseLength;
     uniform float uPhaseHeight;
     uniform float uConvergenceMode;
     uniform float uConvergenceTaper;
+    uniform float uColorMergeTaper;
+    uniform vec3  uMergeTintColor;
+    uniform float uTrunkOnTop;
+    uniform float uMergeAlphaFade;
+    uniform float uBendSpread;
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
+    uniform float uSegPhasesSoft[33];
 
     uniform float uPhaseOffsetA;
     uniform float uPhaseOpacityA;
@@ -414,16 +611,34 @@ const mat = new THREE.ShaderMaterial({
     // Periodic-gap mask along world-X. Returns 1 (rail visible) outside the
     // tick zone, falling to (1 - uTickAmount) at each tick centre. Antialiased
     // against the screen-space dx so edges stay crisp at any zoom.
+    // halfW is widened by half the per-frame camera motion (uMotionStep) so
+    // a thin tick rendered at high scroll speed gets stretched into a soft
+    // bar that covers the swept distance — kills temporal strobing instead
+    // of a 2-wu tick teleporting 75 wu per frame.
     float tickGap(float wx) {
       if (uTickAmount < 1e-3) return 1.0;
       float sp     = max(uTickSpacing, 1.0);
       float u      = wx / sp;
       float frac   = u - floor(u);
       float dist   = min(frac, 1.0 - frac) * sp;
-      float halfW  = max(uTickWidth, 0.0) * 0.5;
+      float halfW  = max(uTickWidth, 0.0) * 0.5
+                   + uMotionStep * 0.5 * clamp(uTickMotionBlur, 0.0, 1.0);
       float aa     = max(fwidth(wx), 1e-4);
       float inside = 1.0 - smoothstep(halfW - aa, halfW + aa, dist);
       return 1.0 - inside * uTickAmount;
+    }
+    // Same shape as tickGap but returns only the [0..1] inside-the-tick
+    // factor, so main() can paint uTickColor on top of the rail composite.
+    float tickInsideMask(float wx) {
+      if (uTickAmount < 1e-3) return 0.0;
+      float sp     = max(uTickSpacing, 1.0);
+      float u      = wx / sp;
+      float frac   = u - floor(u);
+      float dist   = min(frac, 1.0 - frac) * sp;
+      float halfW  = max(uTickWidth, 0.0) * 0.5
+                   + uMotionStep * 0.5 * clamp(uTickMotionBlur, 0.0, 1.0);
+      float aa     = max(fwidth(wx), 1e-4);
+      return 1.0 - smoothstep(halfW - aa, halfW + aa, dist);
     }
 
     // Per-lane color, sourced from the user-controlled uLaneColors array.
@@ -435,6 +650,91 @@ const mat = new THREE.ShaderMaterial({
         if (k == idx) c = uLaneColors[k];
       }
       return c;
+    }
+    vec3 laneShoulder(int idx) {
+      vec3 c = uLaneShoulder[0];
+      for (int k = 1; k < MAX_LANE_BUCKETS; k++) {
+        if (k == idx) c = uLaneShoulder[k];
+      }
+      return c;
+    }
+
+    // Figma 6-stop vertical profile (alpha + color), as a function of
+    // du = |dY| / hHalfT  (0 at rail centerline, 1 at body edge).
+    //   du < 0.22 : solid saturated core
+    //   0.22 .. 0.8 : lerp saturated → pastel shoulder
+    //   0.8 .. 1.0  : lerp pastel → edge color, alpha 1 → 0
+    //   du > 1.0  : alpha 0 (outside body)
+    float figmaProfileAlpha(float du) {
+      float sh = max(uProfileShoulder, 0.001);
+      if (du < sh)   return 1.0;
+      if (du >= 1.0) return 0.0;
+      return 1.0 - (du - sh) / max(1.0 - sh, 0.001);
+    }
+    vec3 figmaProfileColor(float du, vec3 saturated, vec3 pastel, vec3 edge) {
+      float co = clamp(uProfileCore, 0.0, 0.99);
+      float sh = clamp(uProfileShoulder, co + 0.001, 1.0);
+      if (du < co) return saturated;
+      if (du < sh) return mix(saturated, pastel, (du - co) / max(sh - co, 0.001));
+      return mix(pastel, edge, clamp((du - sh) / max(1.0 - sh, 0.001), 0.0, 1.0));
+    }
+
+    // ── Bursts ──────────────────────────────────────────────────────────────
+    // Per-rail painterly slugs scrolling along world-X. The cell partition +
+    // per-cell hash mirrors Ikeda's data-stream pattern, but the envelope
+    // is figmaProfileAlpha (same shoulder shape the rail's Y cross-section
+    // uses) so the burst looks like an isotropic blob, not a digital dash.
+    float burstHash11(float n) {
+      return fract(sin(n * 91.3458) * 47453.5453);
+    }
+    float burstHash21(vec2 v) {
+      return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float burstAlpha(float wx, int rid, float time) {
+      if (uBurstAmount < 1e-3) return 0.0;
+
+      float ridF   = float(rid);
+      // Per-rail velocity multiplier — symmetric around 1.0, range scaled
+      // by uBurstRailSpread so spread=0 → all rails at 1.0x, spread=1 →
+      // rails at 0.0..2.0x of base speed.
+      float velMul = 1.0 + (burstHash11(ridF + 0.5) - 0.5) * 2.0 * clamp(uBurstRailSpread, 0.0, 1.0);
+
+      // Mode A: bursts drift in world-X at their own absolute velocity
+      // (independent of the camera's rail-scroll). Mode B: bursts pinned
+      // to world-X but each rail's X is scaled, giving a parallax desync.
+      float bx = (uBurstLockToRail > 0.5)
+                 ? wx * velMul
+                 : wx - velMul * uBurstSpeed * time;
+
+      float cellW    = max(uBurstCell, 1.0);
+      float u        = bx / cellW;
+      float cellIdx  = floor(u);
+      float cellFrac = u - cellIdx;
+
+      // Per-cell, per-rail seeds for presence / length / position
+      vec2 seed1 = vec2(cellIdx, ridF * 17.31 + 0.5);
+      vec2 seed2 = vec2(cellIdx + 0.31, ridF * 17.31 + 1.71);
+      vec2 seed3 = vec2(cellIdx + 0.71, ridF * 17.31 + 2.13);
+      float r1   = burstHash21(seed1);
+      float r2   = burstHash21(seed2);
+      float r3   = burstHash21(seed3);
+
+      // Density gate: a cell fires when r1 falls inside the density window.
+      if (r1 > clamp(uBurstDensity, 0.0, 1.0)) return 0.0;
+
+      float lmin     = clamp(uBurstLenMin, 0.01, 1.0);
+      float lmax     = clamp(uBurstLenMax, lmin, 1.0);
+      float burstLen = mix(lmin, lmax, r2);
+      // Centre placed somewhere inside the cell that keeps the burst
+      // entirely within it (no cross-cell bleed).
+      float centre   = mix(burstLen * 0.5, 1.0 - burstLen * 0.5, r3);
+
+      float d = abs(cellFrac - centre) / max(burstLen * 0.5, 0.001);
+      if (d >= 1.0) return 0.0;
+
+      // Same shoulder shape the rail uses along Y — burst reads as a soft
+      // isotropic blob rather than a rectangle.
+      return figmaProfileAlpha(d) * clamp(uBurstAmount, 0.0, 1.0);
     }
 
     // Figma-style blend ops. b = backdrop (running dst), s = source (lane
@@ -466,7 +766,15 @@ const mat = new THREE.ShaderMaterial({
       float laneTol = max(uLaneSpacePerUnit * 0.5, 0.5);
 
       float laneCov[MAX_LANE_BUCKETS];
-      for (int i = 0; i < MAX_LANE_BUCKETS; i++) laneCov[i] = 0.0;
+      vec3  laneCol[MAX_LANE_BUCKETS];
+      // Max rail coverage at this fragment *before* the tick gap is applied
+      // — used by the tick painter so uTickColor only shows up where rails
+      // were drawn, not across the full background.
+      float rawMaxA = 0.0;
+      for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
+        laneCov[i] = 0.0;
+        laneCol[i] = vec3(0.0);
+      }
 
       // Single per-fragment computation — applies uniformly to every rail
       // at this wx so all rails freeze together at the zoetrope speed.
@@ -478,8 +786,10 @@ const mat = new THREE.ShaderMaterial({
         // Phase at the START and END of this segment row. The start phase
         // is the previous row's end phase (same loop, one step earlier),
         // so the bend segment smoothly interpolates from spread to merge.
-        float phaseEnd   = uSegPhases[r];
-        float phaseStart = (r > 0) ? uSegPhases[r - 1] : phaseEnd;
+        float phaseEnd       = uSegPhases[r];
+        float phaseStart     = (r > 0) ? uSegPhases[r - 1] : phaseEnd;
+        float phaseSoftEnd   = uSegPhasesSoft[r];
+        float phaseSoftStart = (r > 0) ? uSegPhasesSoft[r - 1] : phaseSoftEnd;
 
         for (int s = 0; s < 9; s++) {
           if (float(s) >= uMaxSlots) break;
@@ -495,6 +805,16 @@ const mat = new THREE.ShaderMaterial({
           float y2 = conn.b;
           float t  = (wx - sx) / uSegW;
           if (t < 0.0 || t >= 1.0) continue;
+
+          // Pull non-trunk rails toward the trunk's lane (Y = 0) by the
+          // softened phase, so the visible bend stretches across many
+          // segments instead of being confined to the one segment where
+          // the SPLIT/MERGE event fires. uSegPhasesSoft is continuous
+          // across segment boundaries, so y1/y2 stay continuous too.
+          if (rid != 0 && uConvergenceMode > 0.5 && uBendSpread > 0.0) {
+            y1 = mix(y1, 0.0, clamp(uBendSpread * phaseSoftStart, 0.0, 1.0));
+            y2 = mix(y2, 0.0, clamp(uBendSpread * phaseSoftEnd,   0.0, 1.0));
+          }
 
           float halfW = baseHalfW;
           if (uConvergenceMode > 0.5 && uConvergenceTaper > 0.0) {
@@ -522,29 +842,109 @@ const mat = new THREE.ShaderMaterial({
           // flush at segment boundaries.
           float d = abs(dY) - hHalfT;
 
-          float fillCov = 1.0 - smoothstep(-aa, aa, d);
-          float dHalo   = max(d, 0.0) / max(hHalfT, 1e-4);
-          float bodyC   = exp(-(dHalo * dHalo) / (2.0 * sig * sig)) * softK;
-          float alpha   = max(fillCov, bodyC) * clamp(uRailOpacity, 0.0, 1.0) * gap;
+          // Per-rail color, optionally washed toward a shared neutral tint
+          // (uMergeTintColor) as the segment phase climbs into the merge.
+          // Every rail desaturates the same way, so by the time greens and
+          // yellow meet they're all the same pale shade and the colour seam
+          // dissolves — matching the figma ribbon-gradient look where each
+          // rail fades into a near-background tone before converging.
+          float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0)
+                           ? clamp(uColorMergeTaper * mix(phaseSoftStart, phaseSoftEnd, t), 0.0, 1.0)
+                           : 0.0;
+          vec3 ridSat  = mix(laneColor(rid),    uMergeTintColor, colorMix);
+          vec3 ridShl  = mix(laneShoulder(rid), uMergeTintColor, colorMix);
+
+          // Burst layer — periodic painterly slugs of uBurstColor scrolled
+          // along this rail's world-X at its own velocity. Mixed into both
+          // the saturated core and the shoulder so the burst inherits the
+          // rail's Y cross-section automatically (figma profile downstream).
+          float bA = burstAlpha(wx, rid, uTime);
+          if (bA > 0.0) {
+            ridSat = mix(ridSat, uBurstColor,                    bA);
+            ridShl = mix(ridShl, mix(uBurstColor, ridShl, 0.4),  bA);
+          }
+
+          float alpha;
+          vec3  fragCol;
+          if (uRailProfile > 0.5) {
+            // Figma profile — body itself has soft edges. du = 0 at the
+            // rail center, du = 1 at the body's outer edge.
+            float du   = abs(dY) / max(hHalfT, 1e-4);
+            float pA   = figmaProfileAlpha(du);
+            alpha      = pA * clamp(uRailOpacity, 0.0, 1.0);
+            fragCol    = figmaProfileColor(du, ridSat, ridShl, uRailEdgeColor);
+          } else {
+            // Gaussian profile (default) — crisp body + soft halo outside.
+            float fillCov = 1.0 - smoothstep(-aa, aa, d);
+            float dHalo   = max(d, 0.0) / max(hHalfT, 1e-4);
+            float bodyC   = exp(-(dHalo * dHalo) / (2.0 * sig * sig)) * softK;
+            alpha         = max(fillCov, bodyC) * clamp(uRailOpacity, 0.0, 1.0);
+            fragCol       = ridSat;
+          }
+          // Fade non-trunk rails out toward the merge so they "grow out
+          // of" the trunk instead of popping in as a full-alpha wedge.
+          // Uses the softened phase so the fade extends gently across
+          // neighbouring segments when Blend softness is up.
+          if (rid != 0 && uConvergenceMode > 0.5 && uMergeAlphaFade > 0.0) {
+            alpha *= 1.0 - clamp(uMergeAlphaFade * mix(phaseSoftStart, phaseSoftEnd, t), 0.0, 1.0);
+          }
+          // Save raw alpha (before tick gap) so the tick painter can mask
+          // its colour to "where the rail would have been", and only then
+          // apply the gap to the rail's composited alpha.
+          float rawA = alpha;
+          alpha *= gap;
+          if (rawA > rawMaxA) rawMaxA = rawA;
           if (alpha < 1e-4) continue;
 
           // Constant-index write — WebGL1 needs static indexing into local
-          // float arrays on some drivers.
+          // arrays on some drivers.
           for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
-            if (k == rid && alpha > laneCov[k]) laneCov[k] = alpha;
+            if (k == rid && alpha > laneCov[k]) {
+              laneCov[k] = alpha;
+              laneCol[k] = fragCol;
+            }
           }
         }
       }
 
       vec3 dst = uBgColor;
       float maxA = 0.0;
+      // Pass 1: composite rails 1..N (non-trunk) first when trunk-on-top
+      // is on, so the trunk paints over the greens. When off, just walk
+      // 0..N in order (original behaviour).
+      int startI = (uTrunkOnTop > 0.5) ? 1 : 0;
       for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
+        if (i < startI) continue;
         float a = laneCov[i];
         if (a < 1e-4) continue;
-        vec3 src     = laneColor(i);
+        // Both profiles now write the per-fragment color (post merge-taper
+        // colour blend) into laneCol[i] at write time, so composite from
+        // there regardless of profile.
+        vec3 src     = laneCol[i];
         vec3 blended = blendOp(dst, src, uBlendMode);
         dst = mix(dst, blended, a);
         if (a > maxA) maxA = a;
+      }
+      // Pass 2: rail 0 last (on top) when trunk-on-top is on. Forces
+      // *normal* blend for the trunk regardless of the global blend mode —
+      // otherwise modes like darken would re-mix it with the greens
+      // underneath and the trunk wouldn't actually paint over.
+      if (uTrunkOnTop > 0.5) {
+        float a0 = laneCov[0];
+        if (a0 >= 1e-4) {
+          vec3 src = laneCol[0];
+          dst = mix(dst, src, a0);
+          if (a0 > maxA) maxA = a0;
+        }
+      }
+      // Paint uTickColor on top of the composited rails, masked by the
+      // tick-inside factor and the raw rail coverage so the tick only
+      // shows where a rail body exists (not across empty background).
+      float tInside = tickInsideMask(wx);
+      if (tInside > 1e-4 && rawMaxA > 1e-4) {
+        float tickPaint = tInside * uTickAmount * rawMaxA;
+        dst = mix(dst, uTickColor, tickPaint);
+        if (tickPaint > maxA) maxA = tickPaint;
       }
       return vec4(dst, maxA);
     }
@@ -626,11 +1026,19 @@ const MOD_TARGETS = [
   { key: 'inkTrapAmount',     label: 'Ink trap amt',  min: 0,    max: 400,   step: 1     },
   { key: 'inkTrapWidth',      label: 'Ink trap width',min: 20,   max: 800,   step: 1     },
   { key: 'inkTrapDensity',    label: 'Ink trap dens', min: 0,    max: 1,     step: 0.01  },
+  { key: 'burstAmount',       label: 'Burst amount',  min: 0,    max: 1,     step: 0.01  },
+  { key: 'burstDensity',      label: 'Burst density', min: 0,    max: 1,     step: 0.01  },
+  { key: 'burstCell',         label: 'Burst cell',    min: 50,   max: 5000,  step: 1     },
+  { key: 'burstSpeed',        label: 'Burst speed',   min: 0,    max: 5000,  step: 1     },
   { key: 'phasePillSpacing',   label: 'Pill spacing',  min: 20,   max: 800,   step: 1     },
   { key: 'phasePillLength',    label: 'Pill length',   min: 4,    max: 400,   step: 1     },
   { key: 'phasePillHeight',    label: 'Pill height',   min: 2,    max: 200,   step: 1     },
   { key: 'phasePillOpacityA',  label: 'Pill opacity',  min: 0,    max: 1,     step: 0.01  },
   { key: 'convergenceTaper',   label: 'Merge taper',   min: 0,    max: 1,     step: 0.01  },
+  { key: 'colorMergeTaper',    label: 'Colour blend',  min: 0,    max: 1,     step: 0.01  },
+  { key: 'colorMergeSoftness', label: 'Blend softness',min: 0,    max: 1,     step: 0.01  },
+  { key: 'mergeAlphaFade',     label: 'Branch fade',   min: 0,    max: 1,     step: 0.01  },
+  { key: 'bendSpread',         label: 'Bend spread',   min: 0,    max: 1,     step: 0.01  },
   { key: 'spawnChance',        label: 'Spawn chance',  min: 0,    max: 1,     step: 0.01  },
   { key: 'endChance',          label: 'End chance',    min: 0,    max: 1,     step: 0.01  },
 ];
@@ -705,35 +1113,114 @@ function syncModulatedSliders() {
 // ── Animation loop ───────────────────────────────────────────────────────
 const clock = new THREE.Clock();
 let exporting = false;   // when true, the export loop drives sim/render manually
+// Fixed-step motion: each rAF firing advances cameraX by speed × (1 /
+// detectedRefreshHz), regardless of when rAF actually fired. This gives
+// perfectly even per-frame motion — required for stable zoetrope ticks.
+// `RENDER_HZ` is updated by detectRefreshRate() once 60 rAF samples are
+// in; until then it sits at 60.
+let DETECTED_HZ = 60;
+let RENDER_HZ   = 60;
+function recomputeRenderHz() {
+  const cap = CONFIG.targetFps | 0;
+  RENDER_HZ = (cap > 0) ? cap : DETECTED_HZ;
+  if (statsHzReadout) {
+    const lockLabel = (cap > 0) ? `locked ${cap}` : 'auto';
+    statsHzReadout.textContent = `${lockLabel} fps · detected ${DETECTED_HZ} Hz`;
+  }
+  // Keep the freeze-speed readout in sync — the freeze multiple shifts
+  // when RENDER_HZ changes.
+  if (typeof window._railwayUpdateFreezeHint === 'function') {
+    window._railwayUpdateFreezeHint();
+  }
+}
+function setDetectedHz(hz) {
+  DETECTED_HZ = hz;
+  recomputeRenderHz();
+}
 
-function tick() {
+// Live FPS panel — uses mrdoob/Stats.js, pinned bottom-left, plus a small
+// readout under it showing the detected refresh rate so you can sanity-
+// check what the fixed-step animation loop is assuming.
+let stats = null;
+let statsHzReadout = null;
+if (typeof Stats !== 'undefined') {
+  stats = new Stats();
+  stats.showPanel(0); // 0 = fps, 1 = ms, 2 = mb (click to cycle)
+  stats.dom.style.position = 'fixed';
+  stats.dom.style.left     = '6px';
+  stats.dom.style.bottom   = '6px';
+  stats.dom.style.top      = 'auto';
+  stats.dom.style.zIndex   = '20';
+  document.body.appendChild(stats.dom);
+
+  statsHzReadout = document.createElement('div');
+  statsHzReadout.textContent = `detected ${RENDER_HZ} Hz`;
+  statsHzReadout.style.cssText = 'position:fixed;left:6px;bottom:54px;'
+    + 'z-index:20;color:#aaa;font:11px/1 monospace;padding:3px 6px;'
+    + 'background:rgba(0,0,0,.55);border-radius:3px;pointer-events:none;';
+  document.body.appendChild(statsHzReadout);
+}
+
+// Last wall-clock timestamp at which we accepted a render frame. Used by
+// the FPS cap below to skip rAF firings that would put us above target.
+let lastRenderedTs = 0;
+function tick(timestamp) {
+  if (stats) stats.begin();
   if (exporting) {
-    // Discard accumulated dt so the first frame after export resumes cleanly.
     clock.getDelta();
+    if (stats) stats.end();
     requestAnimationFrame(tick);
     return;
   }
 
-  const dt = clock.getDelta();
-  mat.uniforms.uTime.value += dt;
+  // FPS cap: when CONFIG.targetFps > 0, skip rAF firings that arrive
+  // sooner than 1/targetFps after the last accepted frame. We allow a
+  // ~0.5 ms slop so a 120 Hz display capped at 60 picks exactly every
+  // other rAF (16.67 ms target, intervals of ~8.33 ms).
+  if (RENDER_HZ > 0 && CONFIG.targetFps > 0) {
+    const now = (typeof timestamp === 'number') ? timestamp : performance.now();
+    const target = 1000 / RENDER_HZ;
+    if (now - lastRenderedTs < target - 0.5) {
+      if (stats) stats.end();
+      requestAnimationFrame(tick);
+      return;
+    }
+    lastRenderedTs = now;
+  }
 
-  // Run user-defined LFO modulators first so any value they touch — including
-  // CONFIG.speed itself — is current when the rest of the frame uses it.
-  stepModulators(dt);
+  // The actual dt is for things that *want* wall-clock fidelity (uTime
+  // for shader procedurals that don't need to lock to the rail rhythm).
+  const rawDt = clock.getDelta();
+  const wallDt = Math.min(rawDt, 1 / 15);
+  // Fixed dt that drives camera motion — constant per frame, so the
+  // camera advances by the same world distance every render regardless
+  // of rAF jitter. Ticks lock to the visible rail rhythm.
+  const frameDt = 1 / RENDER_HZ;
 
-  WORLD.cameraX += CONFIG.speed * dt;
+  mat.uniforms.uTime.value += frameDt;
+
+  // Modulators run on frameDt so their LFOs phase-lock to the same
+  // frame clock that drives camera motion — keeps anything they touch
+  // (including CONFIG.speed) consistent with the rendered cadence.
+  stepModulators(frameDt);
+
+  WORLD.cameraX += CONFIG.speed * frameDt;
   const worldLoop = SIM.WORLD_LOOP;
   if (Number.isFinite(worldLoop) && WORLD.cameraX >= worldLoop) WORLD.cameraX -= worldLoop;
   rebuildLaneData();
   mat.uniforms.uCameraX.value     = WORLD.cameraX;
   mat.uniforms.uLaneOriginX.value = WORLD.laneOriginSeg * CONFIG.segW;
+  // World-units travelled this frame. Used by tick AA's optional
+  // motion-blur slider.
+  mat.uniforms.uMotionStep.value  = Math.abs(CONFIG.speed) * frameDt;
 
   renderer.render(scene, camera);
   // Throttled minimap playhead update (~10 Hz).
-  if ((tick._acc = (tick._acc || 0) + dt) >= 0.1) {
+  if ((tick._acc = (tick._acc || 0) + frameDt) >= 0.1) {
     tick._acc = 0;
     updateMinimapPlayhead();
   }
+  if (stats) stats.end();
   requestAnimationFrame(tick);
 }
 tick();
@@ -782,6 +1269,7 @@ async function exportPngSequence() {
       rebuildLaneData();
       mat.uniforms.uCameraX.value     = WORLD.cameraX;
       mat.uniforms.uLaneOriginX.value = WORLD.laneOriginSeg * CONFIG.segW;
+      mat.uniforms.uMotionStep.value  = Math.abs(CONFIG.speed) * dt;
       renderer.render(scene, camera);
 
       const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
@@ -876,12 +1364,27 @@ function _applyConfigCore(skipMinimap) {
     const hex = CONFIG.laneColors[i] || '#000000';
     mat.uniforms.uLaneColors.value[i].set(hex);
   }
+  // Figma-profile uniforms — shoulder colors fall back to the lane color
+  // so the gaussian default mode still works for presets that don't
+  // include shoulder values.
+  mat.uniforms.uRailProfile.value = (CONFIG.railProfile === 'figma' || CONFIG.railProfile === 1) ? 1 : 0;
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    const hex = (CONFIG.laneShoulderColors && CONFIG.laneShoulderColors[i])
+              || CONFIG.laneColors[i]
+              || '#000000';
+    mat.uniforms.uLaneShoulder.value[i].set(hex);
+  }
+  mat.uniforms.uRailEdgeColor.value.set(CONFIG.railEdgeColor || '#C9C6BC');
+  mat.uniforms.uProfileCore.value     = (typeof CONFIG.profileCore     === 'number') ? CONFIG.profileCore     : 0.22;
+  mat.uniforms.uProfileShoulder.value = (typeof CONFIG.profileShoulder === 'number') ? CONFIG.profileShoulder : 0.80;
   mat.uniforms.uSegW.value             = CONFIG.segW;
   mat.uniforms.uLaneSpacePerUnit.value = CONFIG.laneSpace;
 
   mat.uniforms.uTickAmount.value  = CONFIG.tickAmount;
   mat.uniforms.uTickSpacing.value = CONFIG.tickSpacing;
   mat.uniforms.uTickWidth.value   = CONFIG.tickWidth;
+  mat.uniforms.uTickColor.value.set(CONFIG.tickColor || '#F1EFE8');
+  mat.uniforms.uTickMotionBlur.value = CONFIG.tickMotionBlur ?? 0;
 
   mat.uniforms.uInkTrapAmount.value    = CONFIG.inkTrapAmount;
   mat.uniforms.uInkTrapSpacing.value   = CONFIG.inkTrapSpacing;
@@ -889,12 +1392,31 @@ function _applyConfigCore(skipMinimap) {
   mat.uniforms.uInkTrapWidth.value     = CONFIG.inkTrapWidth;
   mat.uniforms.uInkTrapDirection.value = CONFIG.inkTrapDirection;
 
+  mat.uniforms.uBurstAmount.value     = CONFIG.burstAmount     ?? 0;
+  mat.uniforms.uBurstDensity.value    = CONFIG.burstDensity    ?? 0.5;
+  mat.uniforms.uBurstCell.value       = CONFIG.burstCell       ?? 600;
+  mat.uniforms.uBurstLenMin.value     = CONFIG.burstLenMin     ?? 0.25;
+  mat.uniforms.uBurstLenMax.value     = CONFIG.burstLenMax     ?? 0.85;
+  mat.uniforms.uBurstSpeed.value      = CONFIG.burstSpeed      ?? 800;
+  mat.uniforms.uBurstRailSpread.value = CONFIG.burstRailSpread ?? 0.6;
+  mat.uniforms.uBurstColor.value.set(CONFIG.burstColor || '#DE4D0E');
+  mat.uniforms.uBurstLockToRail.value = CONFIG.burstLockToRail ? 1 : 0;
+
+  // FPS cap may have changed via the panel — propagate to the loop.
+  recomputeRenderHz();
+
   mat.uniforms.uConvergenceMode.value  =
     (CONFIG.simMode === 'convergence'
       || CONFIG.simMode === 'draw'
       || CONFIG.simMode === 'procedural'
-      || CONFIG.simMode === 'branching') ? 1 : 0;
+      || CONFIG.simMode === 'branching'
+      || CONFIG.simMode === 'scripted') ? 1 : 0;
   mat.uniforms.uConvergenceTaper.value = CONFIG.convergenceTaper;
+  mat.uniforms.uColorMergeTaper.value  = CONFIG.colorMergeTaper ?? 0;
+  mat.uniforms.uMergeTintColor.value.set(CONFIG.mergeTintColor || '#C9C6BC');
+  mat.uniforms.uTrunkOnTop.value     = CONFIG.trunkOnTop ? 1 : 0;
+  mat.uniforms.uMergeAlphaFade.value = CONFIG.mergeAlphaFade ?? 0;
+  mat.uniforms.uBendSpread.value     = CONFIG.bendSpread ?? 0;
 
   mat.uniforms.uPhaseEnabled.value  = (CONFIG.simMode === 'phasing') ? 1 : 0;
   mat.uniforms.uPhaseSpacing.value  = CONFIG.phasePillSpacing;
@@ -936,7 +1458,10 @@ function _applyConfigCore(skipMinimap) {
   SIM.setSpawnChance(CONFIG.spawnChance);
   SIM.setEndChance(CONFIG.endChance);
   SIM.setMaxTracks(CONFIG.maxTracks);
-  SIM.setMode(CONFIG.simMode);
+  // 'deploy' is a UI-level mode — the engine itself runs 'draw' topology
+  // (3 stacked rails per drawInitLanes) so the deploy overlay layers on top.
+  SIM.setMode(CONFIG.simMode === 'deploy' ? 'draw' : CONFIG.simMode);
+  recomputePhaseRange();
   rebuildLaneData();
 
   renderer.setClearColor(new THREE.Color(CONFIG.bgColor));
@@ -953,8 +1478,15 @@ function _applyConfigCore(skipMinimap) {
   setVis('phasing-only',     m === 'phasing');
   setVis('convergence-only', m === 'convergence');
   setVis('draw-only',        m === 'draw');
-  setVis('taper-only',       m === 'convergence' || m === 'draw' || m === 'procedural' || m === 'branching');
-  setVis('loop-segs-label',  m === 'scripted' || m === 'draw');
+  setVis('deploy-only',      m === 'deploy');
+  setVis('taper-only',       m === 'convergence' || m === 'draw' || m === 'procedural' || m === 'branching' || m === 'scripted');
+  setVis('loop-segs-label',  m === 'scripted' || m === 'draw' || m === 'deploy');
+
+  // Notify the deploy overlay that CONFIG changed so it can rebuild its
+  // timeline / show or hide based on the new simMode.
+  if (typeof window.refreshDeployOverlay === 'function') {
+    window.refreshDeployOverlay();
+  }
 
   if (!skipMinimap) buildMinimap();
 }
@@ -1201,6 +1733,15 @@ function bindGlobalControls() {
     if (!(key in CONFIG)) return;
     const isNum   = el.type === 'range' || el.type === 'number';
     const isColor = el.type === 'color';
+    const isCheck = el.type === 'checkbox';
+    if (isCheck) {
+      el.checked = !!CONFIG[key];
+      el.addEventListener('change', () => {
+        CONFIG[key] = el.checked;
+        applyConfig();
+      });
+      return;
+    }
     el.value = CONFIG[key];
 
     let readout = document.querySelector(`#panel [data-v="${key}"]`);
@@ -1323,20 +1864,50 @@ function bindGlobalControls() {
     }
   }
 
+  // Shoulder color pickers — figma profile only. Same shape as lane-color-row.
+  const shoulderRow = document.getElementById('shoulder-color-row');
+  if (shoulderRow) {
+    shoulderRow.innerHTML = '';
+    for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+      const inp = document.createElement('input');
+      inp.type = 'color';
+      inp.dataset.shoulder = String(i);
+      inp.value = (CONFIG.laneShoulderColors && CONFIG.laneShoulderColors[i]) || CONFIG.laneColors[i] || '#000000';
+      inp.title = `Rail ${i} shoulder`;
+      inp.addEventListener('input', () => {
+        if (!Array.isArray(CONFIG.laneShoulderColors)) {
+          CONFIG.laneShoulderColors = CONFIG.laneColors.slice();
+        }
+        CONFIG.laneShoulderColors[i] = inp.value;
+        applyConfig();
+      });
+      shoulderRow.appendChild(inp);
+    }
+  }
+
   // Zoetrope freeze readout + snap button. Freeze speed = tickSpacing ×
   // refresh rate; zoom drops out because period and motion both scale with
-  // it. We assume 60 Hz — common case; the button just sets CONFIG.speed.
-  const FREEZE_HZ = 60;
+  // it. We auto-detect the refresh rate by sampling rAF intervals — 60 Hz
+  // is just the initial guess until the measurement settles. On ProMotion
+  // 120 Hz Macs / 144 Hz monitors the freeze multiple is very different.
+  let FREEZE_HZ = 60;
   function updateFreezeHint() {
     const el = document.getElementById('freeze-hint');
     if (!el) return;
-    const f = (CONFIG.tickSpacing | 0) * FREEZE_HZ;
-    el.textContent = `freeze ≈ ${f.toLocaleString()} wu/s @ ${FREEZE_HZ} Hz`;
+    // Use the rate the loop is actually rendering at — that's what makes
+    // ticks freeze. RENDER_HZ tracks either the FPS cap or the detected
+    // refresh rate, whichever is in effect.
+    const rate = RENDER_HZ || FREEZE_HZ;
+    const f = (CONFIG.tickSpacing | 0) * rate;
+    el.textContent = `freeze ≈ ${f.toLocaleString()} wu/s @ ${rate} Hz`;
   }
+  // Make this reachable from setDetectedHz / panel changes so the readout
+  // tracks the live RENDER_HZ.
+  window._railwayUpdateFreezeHint = updateFreezeHint;
   const snapBtn = document.getElementById('snap-freeze');
   if (snapBtn) {
     snapBtn.addEventListener('click', () => {
-      CONFIG.speed = (CONFIG.tickSpacing | 0) * FREEZE_HZ;
+      CONFIG.speed = (CONFIG.tickSpacing | 0) * (RENDER_HZ || FREEZE_HZ);
       applyConfig();
       syncPanelToConfig();
     });
@@ -1344,6 +1915,40 @@ function bindGlobalControls() {
   const tickSpacingEl = document.querySelector('#panel input[data-k="tickSpacing"]');
   if (tickSpacingEl) tickSpacingEl.addEventListener('input', updateFreezeHint);
   updateFreezeHint();
+
+  // Measure refresh rate by sampling 60 rAF intervals, then take the
+  // median (robust against the odd jittered frame) and round to a sane
+  // value (60 / 90 / 120 / 144 / 165).
+  (function detectRefreshRate() {
+    const samples = [];
+    let prev = null, count = 0;
+    function probe(ts) {
+      if (prev !== null) samples.push(ts - prev);
+      prev = ts;
+      if (++count < 60) {
+        requestAnimationFrame(probe);
+      } else {
+        samples.sort((a, b) => a - b);
+        const medianMs = samples[samples.length >> 1];
+        if (medianMs > 0.5) {
+          const fps = 1000 / medianMs;
+          // Snap to common refresh rates.
+          const stops = [30, 60, 75, 90, 120, 144, 165, 240];
+          let best = stops[0], bestErr = Infinity;
+          for (const s of stops) {
+            const err = Math.abs(s - fps);
+            if (err < bestErr) { best = s; bestErr = err; }
+          }
+          FREEZE_HZ = best;
+          // Inform the fixed-step animation loop. RENDER_HZ tracks either
+          // the user's FPS cap (CONFIG.targetFps) or this detected rate.
+          setDetectedHz(best);
+          updateFreezeHint();
+        }
+      }
+    }
+    requestAnimationFrame(probe);
+  })();
 
   // Preset save / revert + drag-and-drop load.
   const saveBtn   = document.getElementById('preset-save');
@@ -1602,7 +2207,8 @@ function syncPanelToConfig() {
   document.querySelectorAll('#panel input[data-k], #panel select[data-k]').forEach((el) => {
     const key = el.dataset.k;
     if (!(key in CONFIG)) return;
-    el.value = CONFIG[key];
+    if (el.type === 'checkbox') el.checked = !!CONFIG[key];
+    else el.value = CONFIG[key];
   });
   document.querySelectorAll('#panel [data-v]').forEach((el) => {
     const key = el.dataset.v;
@@ -1616,6 +2222,12 @@ function syncPanelToConfig() {
     const c = CONFIG.laneColors && CONFIG.laneColors[i];
     if (c) el.value = c;
   });
+  document.querySelectorAll('#shoulder-color-row input[data-shoulder]').forEach((el) => {
+    const i = parseInt(el.dataset.shoulder, 10);
+    const c = (CONFIG.laneShoulderColors && CONFIG.laneShoulderColors[i])
+            || (CONFIG.laneColors && CONFIG.laneColors[i]);
+    if (c) el.value = c;
+  });
   if (typeof window._railwayRebuildModulators === 'function') {
     window._railwayRebuildModulators();
   }
@@ -1626,3 +2238,23 @@ applyConfig();
 
 window.RAILWAY = { CONFIG, mat, applyConfig, renderer, scene, camera, WORLD, rebuildLaneData };
 console.log('Railway minimal — sim + rails. Tweak via RAILWAY.CONFIG.');
+
+// Load the default preset on page open. Drops back to the built-in
+// DEFAULT_CONFIG silently if the file isn't reachable so the page still
+// renders something. Same shape as the drag-drop loader: copy only
+// schema-matching keys, then re-apply + sync panel.
+(async () => {
+  try {
+    const res = await fetch('presets/colourExploration_merging_05.json?t=' + Date.now());
+    if (!res.ok) return;
+    const incoming = await res.json();
+    if (typeof incoming !== 'object' || incoming === null) return;
+    for (const key of Object.keys(CONFIG)) {
+      if (key in incoming) CONFIG[key] = incoming[key];
+    }
+    applyConfig();
+    if (typeof syncPanelToConfig === 'function') syncPanelToConfig();
+  } catch (err) {
+    console.warn('Default preset load failed:', err);
+  }
+})();
