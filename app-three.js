@@ -211,6 +211,14 @@ const CONFIG = {
   // PNG sequence export
   exportFrames: 120,
   exportFps:    30,
+  // Export resolution and live preview aspect lock. When `aspectLock` is
+  // on, the canvas is letterboxed in the window to `exportWidth :
+  // exportHeight` so the preview shows exactly what will be exported.
+  // The PNG export writes frames at exactly exportWidth × exportHeight
+  // pixels regardless of window/zoom.
+  exportWidth:  1920,
+  exportHeight: 1080,
+  aspectLock:   true,
 
   // Lock the live render loop to this fps (0 = use detected refresh rate).
   // On a 120 Hz display, leaving this at 60 gives a perfectly predictable
@@ -276,8 +284,29 @@ renderer.setClearColor(new THREE.Color(CONFIG.bgColor));
 const scene  = new THREE.Scene();
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
 
+// Fit the canvas inside the window. When CONFIG.aspectLock is on, the
+// canvas is letterboxed / pillar-boxed to `exportWidth:exportHeight` and
+// centered, so the preview shows exactly the frame that will be saved
+// during PNG export. Off → canvas fills the whole window.
 function resize() {
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  let cssW = window.innerWidth;
+  let cssH = window.innerHeight;
+  if (CONFIG.aspectLock && CONFIG.exportWidth > 0 && CONFIG.exportHeight > 0) {
+    const targetAR = CONFIG.exportWidth / CONFIG.exportHeight;
+    const windowAR = cssW / cssH;
+    if (windowAR > targetAR) {
+      // Window wider than target → narrow the canvas (pillar-box).
+      cssW = Math.floor(cssH * targetAR);
+    } else {
+      // Window taller than target → shorten the canvas (letter-box).
+      cssH = Math.floor(cssW / targetAR);
+    }
+  }
+  renderer.setSize(cssW, cssH, true);
+  // Centre the canvas inside the window so the letterbox bars are even.
+  canvas.style.position = 'absolute';
+  canvas.style.left = Math.floor((window.innerWidth  - cssW) / 2) + 'px';
+  canvas.style.top  = Math.floor((window.innerHeight - cssH) / 2) + 'px';
 }
 window.addEventListener('resize', resize);
 resize();
@@ -1355,6 +1384,17 @@ async function exportPngSequence() {
   btn.disabled = true;
   const origLabel = btn.textContent;
 
+  // Resize the renderer to the exact export pixel dimensions. We force
+  // pixelRatio=1 so 1920×1080 means 1920×1080 framebuffer pixels (not
+  // multiplied on a Retina display). The state is restored in `finally`.
+  const exportW = Math.max(1, CONFIG.exportWidth  | 0);
+  const exportH = Math.max(1, CONFIG.exportHeight | 0);
+  const savedPixelRatio = renderer.getPixelRatio();
+  const savedW = renderer.domElement.width;
+  const savedH = renderer.domElement.height;
+  renderer.setPixelRatio(1);
+  renderer.setSize(exportW, exportH, false);
+
   try {
     for (let i = 0; i < N; i++) {
       btn.textContent = `Exporting ${i + 1}/${N}…`;
@@ -1397,6 +1437,10 @@ async function exportPngSequence() {
       URL.revokeObjectURL(url);
     }
   } finally {
+    // Restore the live renderer to its pre-export size + pixel ratio.
+    renderer.setPixelRatio(savedPixelRatio);
+    renderer.setSize(savedW, savedH, false);
+    resize();   // re-letterbox to the current window
     btn.textContent = origLabel;
     btn.disabled = false;
     exporting = false;
@@ -1501,6 +1545,8 @@ function _applyConfigCore(skipMinimap) {
 
   // FPS cap may have changed via the panel — propagate to the loop.
   recomputeRenderHz();
+  // Aspect-lock / export dimensions may have changed — re-letterbox.
+  if (typeof resize === 'function') resize();
 
   mat.uniforms.uConvergenceMode.value  =
     (CONFIG.simMode === 'convergence'

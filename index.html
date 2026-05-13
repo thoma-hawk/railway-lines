@@ -435,9 +435,13 @@
 
       <section id="pinned-export">
         <div class="sub-head">Export</div>
+        <label>Width  <input type="number" min="16" max="7680" step="1" data-k="exportWidth"  style="width:72px"></label>
+        <label>Height <input type="number" min="16" max="4320" step="1" data-k="exportHeight" style="width:72px"></label>
+        <label class="mod-toggle"><input type="checkbox" data-k="aspectLock"> Aspect lock preview</label>
         <label>Frames <input type="number" min="1" max="9999" step="1" data-k="exportFrames" style="width:72px"></label>
         <label>FPS <input type="number" min="1" max="120" step="1" data-k="exportFps" style="width:72px"></label>
         <button id="export-btn">Export PNG sequence</button>
+        <div class="preset-hint">Aspect lock letterboxes the live preview to Width:Height so what you see matches the exported frame exactly. PNGs are always written at the chosen pixel dimensions regardless of window size.</div>
       </section>
 
       <section id="pinned-preset">
@@ -471,8 +475,8 @@
   <!-- JSZip — used as a fallback when the File System Access API isn't
        available (Firefox / Safari) so the export bundles into one .zip. -->
   <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="sim.js?v=62"></script>
-  <script src="app-three.js?v=62"></script>
+  <script src="sim.js?v=63"></script>
+  <script src="app-three.js?v=63"></script>
   <!-- Deploy overlay: GSAP-driven gradient sweep on top of the engine. -->
   <script src="deploy-anim/vendor/gsap.min.js"></script>
   <script src="deploy-overlay.js"></script>
