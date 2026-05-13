@@ -1546,7 +1546,11 @@ function _applyConfigCore(skipMinimap) {
   // FPS cap may have changed via the panel — propagate to the loop.
   recomputeRenderHz();
   // Aspect-lock / export dimensions may have changed — re-letterbox.
-  if (typeof resize === 'function') resize();
+  // Skipped while exporting, because the export loop has already
+  // resized the renderer to exportWidth × exportHeight; calling resize()
+  // here on each modulator step would shrink the framebuffer back to
+  // the live preview's letterboxed size mid-export.
+  if (typeof resize === 'function' && !exporting) resize();
 
   mat.uniforms.uConvergenceMode.value  =
     (CONFIG.simMode === 'convergence'
