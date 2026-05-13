@@ -189,6 +189,30 @@ const CONFIG = {
   // a saturated spine.
   branchWidthScale: 1.0,
 
+  // Colour timeline — when enabled, every rail's body colour follows
+  // keyframes anchored to the loop's normalised position (0..1). The
+  // existing merge-wash still applies on top of the sampled colour, so
+  // branches still calm toward `mergeTintColor` at the bend. Max 16
+  // stops; t values are clamped to [0,1] and sorted at uniform-push time.
+  colorTimelineEnabled: false,
+  colorTimeline: [
+    { t: 0.00, core: '#D9DECA', shoulder: '#E9F3CD' },
+    { t: 0.20, core: '#D9DECA', shoulder: '#E9F3CD' },
+    { t: 0.32, core: '#FAB936', shoulder: '#FED2B5' },
+    { t: 0.55, core: '#FAB936', shoulder: '#FED2B5' },
+    { t: 0.70, core: '#1923A8', shoulder: '#5D96F4' },
+    { t: 0.85, core: '#1923A8', shoulder: '#5D96F4' },
+    { t: 1.00, core: '#D9DECA', shoulder: '#E9F3CD' }
+  ],
+  // Per-rail-id offset on the colour-timeline `loopT` sample. The rail
+  // looks up the timeline at (loopT + offset[rid]) wrapped to [0,1).
+  // Positive = that rail is "further along" the colour story at any
+  // given wx, so it reaches each colour stop earlier than rails with
+  // smaller offsets. Use to stagger the colour cascade — e.g. trunk
+  // turns blue first, then top, then bottom. Length 9 (one per rail
+  // bucket); missing entries default to 0.
+  colorTimelineRailOffsets: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+
   // Topology drawing — when true, dragging in the minimap adds a MERGE
   // event to the active scripted-mode (or draw-mode) timeline. Click-to-
   // seek is paused while this is on. Shift-drag adds a SPLIT instead.
@@ -508,6 +532,17 @@ const mat = new THREE.ShaderMaterial({
     uMergeAlphaFade:     { value: CONFIG.mergeAlphaFade ?? 0 },
     uBendSpread:         { value: CONFIG.bendSpread ?? 0 },
     uBranchWidthScale:   { value: CONFIG.branchWidthScale ?? 1 },
+
+    // Colour timeline — keyframes anchored to loop position. Up to 16
+    // stops; sampleTimeline() in the shader does the lerp.
+    uColorTimelineEnabled:  { value: 0 },
+    uColorTimelineCount:    { value: 0 },
+    uColorTimelineTs:        { value: new Float32Array(16) },
+    uColorTimelineCores:     { value: Array.from({ length: 16 }, () => new THREE.Color('#000')) },
+    uColorTimelineShoulders: { value: Array.from({ length: 16 }, () => new THREE.Color('#000')) },
+    uColorTimelineRailOffsets: { value: new Float32Array(9) },
+    uLoopLen:               { value: 45000 },
+
     uSegPhases:        { value: segPhaseArray },
     uSegPhasesSoft:    { value: segPhaseSoftArray },
 
@@ -598,6 +633,16 @@ const mat = new THREE.ShaderMaterial({
     uniform float uMergeAlphaFade;
     uniform float uBendSpread;
     uniform float uBranchWidthScale;
+    // Colour timeline — up to 16 stops, lerped by loop position. When
+    // uColorTimelineEnabled > 0.5 the rail's base colours come from this
+    // table instead of laneColor(rid) / laneShoulder(rid).
+    uniform float uColorTimelineEnabled;
+    uniform float uColorTimelineCount;
+    uniform float uColorTimelineTs[16];
+    uniform vec3  uColorTimelineCores[16];
+    uniform vec3  uColorTimelineShoulders[16];
+    uniform float uColorTimelineRailOffsets[9];
+    uniform float uLoopLen;
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
@@ -811,6 +856,42 @@ const mat = new THREE.ShaderMaterial({
       return s;                                                                // Normal
     }
 
+    // Sample the colour timeline at a normalised loop position t∈[0,1).
+    // Out-of-band values wrap. Holds the first/last stop's value outside
+    // the defined span. Lerps linearly between adjacent stops on both
+    // the core and shoulder channels.
+    void sampleColorTimeline(float t, out vec3 core, out vec3 shoulder) {
+      int cnt = int(uColorTimelineCount + 0.5);
+      if (cnt < 1) {
+        core = vec3(1.0); shoulder = vec3(1.0); return;
+      }
+      t = fract(t);
+      // Default to first stop, then walk to find the segment containing t.
+      core = uColorTimelineCores[0];
+      shoulder = uColorTimelineShoulders[0];
+      // Constant-index unroll for WebGL1 compatibility.
+      for (int i = 0; i < 15; i++) {
+        if (i + 1 >= cnt) break;
+        float t0 = uColorTimelineTs[i];
+        float t1 = uColorTimelineTs[i + 1];
+        if (t >= t0 && t < t1) {
+          float u = (t - t0) / max(t1 - t0, 0.0001);
+          core     = mix(uColorTimelineCores[i],     uColorTimelineCores[i + 1],     u);
+          shoulder = mix(uColorTimelineShoulders[i], uColorTimelineShoulders[i + 1], u);
+          return;
+        }
+      }
+      // Past the last stop — hold the last value (cnt is in [1,16]).
+      int last = cnt - 1;
+      for (int i = 0; i < 16; i++) {
+        if (i == last) {
+          core     = uColorTimelineCores[i];
+          shoulder = uColorTimelineShoulders[i];
+          return;
+        }
+      }
+    }
+
     // Render the rail body at this fragment. Two-stage:
     //   1. scan every connection, accumulate a max-coverage value into the
     //      owner lane's bucket (so multiple conns of the same rail collapse
@@ -934,8 +1015,24 @@ const mat = new THREE.ShaderMaterial({
           float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0 && !exemptTrunk)
                            ? clamp(uColorMergeTaper * colorMixEased, 0.0, 1.0)
                            : 0.0;
-          vec3 ridSat  = mix(laneColor(rid),    uMergeTintColor, colorMix);
-          vec3 ridShl  = mix(laneShoulder(rid), uMergeTintColor, colorMix);
+          // Base colours — either the per-rail palette (default) or the
+          // colour timeline sampled by this fragment's loop position.
+          vec3 baseCore = laneColor(rid);
+          vec3 baseShl  = laneShoulder(rid);
+          if (uColorTimelineEnabled > 0.5 && uLoopLen > 0.0) {
+            float loopT = fract(wx / uLoopLen);
+            // Per-rail offset on the timeline lookup — lets each rail
+            // reach the same colour stop at a slightly different wx so
+            // the cascade can stagger trunk vs branches.
+            float railOffset = 0.0;
+            for (int k = 0; k < 9; k++) {
+              if (k == rid) { railOffset = uColorTimelineRailOffsets[k]; break; }
+            }
+            loopT = fract(loopT + railOffset + 1.0);   // +1 so negative offsets wrap correctly
+            sampleColorTimeline(loopT, baseCore, baseShl);
+          }
+          vec3 ridSat  = mix(baseCore, uMergeTintColor, colorMix);
+          vec3 ridShl  = mix(baseShl,  uMergeTintColor, colorMix);
 
           // Burst layer — periodic painterly slugs of uBurstColor scrolled
           // along this rail's world-X at its own velocity. Mixed into both
@@ -1534,6 +1631,50 @@ function applyConfig() {
   _applyConfigCore();
 }
 
+// Validate, clamp, sort, and push CONFIG.colorTimeline into the shader
+// uniform arrays. Tolerates malformed entries (missing fields, NaN t,
+// > 16 stops) by filtering / clamping / capping.
+function pushColorTimelineToUniforms() {
+  const raw = Array.isArray(CONFIG.colorTimeline) ? CONFIG.colorTimeline : [];
+  const cleaned = raw
+    .filter(k => k && typeof k === 'object')
+    .map(k => ({
+      t:        Math.max(0, Math.min(1, Number(k.t) || 0)),
+      core:     String(k.core || '#ffffff'),
+      shoulder: String(k.shoulder || k.core || '#ffffff'),
+    }))
+    .sort((a, b) => a.t - b.t)
+    .slice(0, 16);
+
+  const tsArr   = mat.uniforms.uColorTimelineTs.value;
+  const corArr  = mat.uniforms.uColorTimelineCores.value;
+  const shlArr  = mat.uniforms.uColorTimelineShoulders.value;
+  for (let i = 0; i < 16; i++) {
+    if (i < cleaned.length) {
+      tsArr[i] = cleaned[i].t;
+      corArr[i].set(cleaned[i].core);
+      shlArr[i].set(cleaned[i].shoulder);
+    } else {
+      tsArr[i] = 1;                  // park beyond range so the search exits
+      corArr[i].set('#000000');
+      shlArr[i].set('#000000');
+    }
+  }
+  mat.uniforms.uColorTimelineCount.value   = cleaned.length;
+  mat.uniforms.uColorTimelineEnabled.value = CONFIG.colorTimelineEnabled ? 1 : 0;
+
+  const offsetsIn = Array.isArray(CONFIG.colorTimelineRailOffsets)
+    ? CONFIG.colorTimelineRailOffsets : [];
+  const offsetsArr = mat.uniforms.uColorTimelineRailOffsets.value;
+  for (let i = 0; i < 9; i++) {
+    const v = Number(offsetsIn[i]);
+    offsetsArr[i] = Number.isFinite(v) ? v : 0;
+  }
+  // Loop length follows the active sim cycle so the timeline wraps in
+  // sync with the SPLIT/MERGE cadence.
+  mat.uniforms.uLoopLen.value = Math.max(1, (CONFIG.loopSegs | 0) * (CONFIG.segW | 0));
+}
+
 function _applyConfigCore(skipMinimap) {
   mat.uniforms.uZoom.value        = CONFIG.viewZoom;
   mat.uniforms.uRailWidth.value   = CONFIG.railWidth;
@@ -1608,6 +1749,11 @@ function _applyConfigCore(skipMinimap) {
   mat.uniforms.uMergeAlphaFade.value = CONFIG.mergeAlphaFade ?? 0;
   mat.uniforms.uBendSpread.value       = CONFIG.bendSpread ?? 0;
   mat.uniforms.uBranchWidthScale.value = CONFIG.branchWidthScale ?? 1;
+
+  // Colour timeline — clamp + sort + push the up-to-16 keyframes into
+  // the shader uniform arrays. Loop length comes from sim params so the
+  // sampling wraps correctly with the script's cycle.
+  pushColorTimelineToUniforms();
 
   mat.uniforms.uPhaseEnabled.value  = (CONFIG.simMode === 'phasing') ? 1 : 0;
   mat.uniforms.uPhaseSpacing.value  = CONFIG.phasePillSpacing;
@@ -2226,6 +2372,121 @@ function bindGlobalControls() {
     });
   }
 
+  // ── Colour timeline editor ──────────────────────────────────────────────
+  // Row-based UI: each keyframe gets a Time input, a Core colour picker,
+  // a Shoulder colour picker, and a remove button. Plus an "Add" button.
+  // Below the rows, a small grid of per-rail loop-T offsets (rail 0..2 by
+  // default; rest are usually unused in scripted/draw modes).
+  function rebuildColourTimelineEditor() {
+    const root = document.getElementById('color-timeline-editor');
+    if (!root) return;
+    root.innerHTML = '';
+    if (!Array.isArray(CONFIG.colorTimeline)) CONFIG.colorTimeline = [];
+
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'display:flex; gap:6px; font:9px ui-monospace, monospace; '
+      + 'color:#8a94a0; letter-spacing:0.04em; text-transform:uppercase; margin-bottom:3px;';
+    hdr.innerHTML = '<span style="flex:1">t (loop pos)</span>'
+                  + '<span style="flex:1">Core</span>'
+                  + '<span style="flex:1">Shoulder</span>'
+                  + '<span style="width:22px"></span>';
+    root.appendChild(hdr);
+
+    for (let i = 0; i < CONFIG.colorTimeline.length; i++) {
+      const kf = CONFIG.colorTimeline[i];
+      const row = document.createElement('div');
+      row.className = 'mod-row';
+      const tIn = document.createElement('input');
+      tIn.type = 'number'; tIn.step = '0.01'; tIn.min = '0'; tIn.max = '1';
+      tIn.value = (typeof kf.t === 'number') ? kf.t : 0;
+      tIn.style.flex = '1';
+      tIn.addEventListener('input', () => {
+        const v = parseFloat(tIn.value);
+        if (!Number.isNaN(v)) { kf.t = Math.max(0, Math.min(1, v)); applyConfig(); }
+      });
+      const cIn = document.createElement('input');
+      cIn.type = 'color'; cIn.value = kf.core || '#ffffff';
+      cIn.style.flex = '1';
+      cIn.addEventListener('input', () => { kf.core = cIn.value; applyConfig(); });
+      const sIn = document.createElement('input');
+      sIn.type = 'color'; sIn.value = kf.shoulder || kf.core || '#ffffff';
+      sIn.style.flex = '1';
+      sIn.addEventListener('input', () => { kf.shoulder = sIn.value; applyConfig(); });
+      const rm = document.createElement('button');
+      rm.className = 'mod-remove'; rm.textContent = '×'; rm.title = 'Remove keyframe';
+      rm.addEventListener('click', () => {
+        CONFIG.colorTimeline.splice(i, 1);
+        rebuildColourTimelineEditor();
+        applyConfig();
+      });
+      row.appendChild(tIn); row.appendChild(cIn); row.appendChild(sIn); row.appendChild(rm);
+      root.appendChild(row);
+    }
+    const addBtn = document.createElement('button');
+    addBtn.className = 'preset-btn'; addBtn.style.marginTop = '4px';
+    addBtn.textContent = '+ Add keyframe';
+    addBtn.addEventListener('click', () => {
+      const lastT = CONFIG.colorTimeline.reduce((mx, k) => Math.max(mx, k.t || 0), 0);
+      const lastK = CONFIG.colorTimeline[CONFIG.colorTimeline.length - 1] || { core: '#888', shoulder: '#ccc' };
+      CONFIG.colorTimeline.push({
+        t: Math.min(1, lastT + 0.1),
+        core: lastK.core || '#888',
+        shoulder: lastK.shoulder || '#ccc',
+      });
+      rebuildColourTimelineEditor();
+      applyConfig();
+    });
+    root.appendChild(addBtn);
+
+    // Per-rail offsets (rails 0..2 — the three buckets used in scripted/
+    // draw modes by default; you can edit higher entries via JSON if you
+    // ever need them).
+    const offRoot = document.getElementById('color-timeline-offsets');
+    if (offRoot) {
+      offRoot.innerHTML = '';
+      const offHdr = document.createElement('div');
+      offHdr.style.cssText = 'font:9px ui-monospace, monospace; color:#8a94a0; '
+        + 'letter-spacing:0.04em; text-transform:uppercase; margin-bottom:3px;';
+      offHdr.textContent = 'Per-rail loop-t offset';
+      offRoot.appendChild(offHdr);
+      if (!Array.isArray(CONFIG.colorTimelineRailOffsets)) {
+        CONFIG.colorTimelineRailOffsets = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+      }
+      const railLabels = ['Trunk (rid 0)', 'Branch ↓ (rid 1)', 'Branch ↑ (rid 2)'];
+      for (let r = 0; r < 3; r++) {
+        const row = document.createElement('div');
+        row.className = 'mod-row';
+        const lab = document.createElement('label');
+        lab.className = 'mod-num';
+        lab.style.flex = '2';
+        lab.appendChild(document.createTextNode(railLabels[r]));
+        const inp = document.createElement('input');
+        inp.type = 'number'; inp.step = '0.01'; inp.min = '-1'; inp.max = '1';
+        inp.value = CONFIG.colorTimelineRailOffsets[r] ?? 0;
+        inp.addEventListener('input', () => {
+          const v = parseFloat(inp.value);
+          if (!Number.isNaN(v)) {
+            CONFIG.colorTimelineRailOffsets[r] = v;
+            applyConfig();
+          }
+        });
+        lab.appendChild(inp);
+        row.appendChild(lab);
+        offRoot.appendChild(row);
+      }
+      const hint = document.createElement('div');
+      hint.className = 'preset-hint';
+      hint.textContent = 'Each rail samples the timeline at (loopT + offset). '
+        + 'Positive offset = that rail reaches each colour stop earlier in the loop. '
+        + 'Stagger trunk vs branches for a visible cascade.';
+      offRoot.appendChild(hint);
+    }
+  }
+
+  // Initial build, and on preset load (syncPanelToConfig hook below).
+  rebuildColourTimelineEditor();
+  window._railwayRebuildColourTimeline = rebuildColourTimelineEditor;
+
   // ── Modulators panel ────────────────────────────────────────────────────
   function rebuildModulatorsList() {
     const root = document.getElementById('modulators-list');
@@ -2492,6 +2753,9 @@ function syncPanelToConfig() {
   });
   if (typeof window._railwayRebuildModulators === 'function') {
     window._railwayRebuildModulators();
+  }
+  if (typeof window._railwayRebuildColourTimeline === 'function') {
+    window._railwayRebuildColourTimeline();
   }
 }
 
