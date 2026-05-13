@@ -159,6 +159,17 @@ const CONFIG = {
   // (saturated body → pale neutral). Use a colour close to bgColor for the
   // softest "rails dissolve into the background near the merge" look.
   mergeTintColor: '#C9C6BC',
+  // When true, rail 0 (the trunk) skips the colour-merge wash. The trunk
+  // keeps its base colour all the way through, while branches transition
+  // to mergeTintColor at the bend. Matches the Railway brand reading of
+  // "trunk = always-shipped mainline; branches = active work, calming to
+  // shipped state at the merge".
+  colorMergeTrunkExempt: true,
+  // Power curve applied to the wash within a bend. 1.0 = linear ramp
+  // (original behaviour); < 1 = easeOut (cream visible at the bend's
+  // start); > 1 = easeIn (cream only near the bend's end). Lower means
+  // the merge calmness reads sooner as the rail starts curving.
+  colorMergeCurve: 0.5,
   // When true, rail 0 (the trunk) composites *over* rails 1..N instead of
   // under them — so greens recede behind the yellow trunk at the merge.
   trunkOnTop: false,
@@ -171,6 +182,12 @@ const CONFIG = {
   // though the script's bend is still confined to one segment. Combine
   // with Blend softness to widen the "splitting" zone.
   bendSpread: 0,
+  // Multiplier on rail body width for every non-trunk rail (rid != 0).
+  // 1 = identical to the trunk. > 1 = wider, softer "halo" branches that
+  // read as blurred fade-ins next to a crisp narrow trunk. Matches the
+  // figma-svg look where merging rails are desaturated halos approaching
+  // a saturated spine.
+  branchWidthScale: 1.0,
 
   // Topology drawing — when true, dragging in the minimap adds a MERGE
   // event to the active scripted-mode (or draw-mode) timeline. Click-to-
@@ -485,9 +502,12 @@ const mat = new THREE.ShaderMaterial({
     uConvergenceTaper:   { value: CONFIG.convergenceTaper },
     uColorMergeTaper:    { value: CONFIG.colorMergeTaper ?? 0 },
     uMergeTintColor:     { value: new THREE.Color(CONFIG.mergeTintColor || '#C9C6BC') },
+    uColorMergeTrunkExempt: { value: CONFIG.colorMergeTrunkExempt ? 1 : 0 },
+    uColorMergeCurve:       { value: CONFIG.colorMergeCurve ?? 1 },
     uTrunkOnTop:         { value: CONFIG.trunkOnTop ? 1 : 0 },
     uMergeAlphaFade:     { value: CONFIG.mergeAlphaFade ?? 0 },
     uBendSpread:         { value: CONFIG.bendSpread ?? 0 },
+    uBranchWidthScale:   { value: CONFIG.branchWidthScale ?? 1 },
     uSegPhases:        { value: segPhaseArray },
     uSegPhasesSoft:    { value: segPhaseSoftArray },
 
@@ -572,9 +592,12 @@ const mat = new THREE.ShaderMaterial({
     uniform float uConvergenceTaper;
     uniform float uColorMergeTaper;
     uniform vec3  uMergeTintColor;
+    uniform float uColorMergeTrunkExempt;
+    uniform float uColorMergeCurve;
     uniform float uTrunkOnTop;
     uniform float uMergeAlphaFade;
     uniform float uBendSpread;
+    uniform float uBranchWidthScale;
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
@@ -852,7 +875,12 @@ const mat = new THREE.ShaderMaterial({
             y2 = mix(y2, 0.0, clamp(uBendSpread * phaseSoftEnd,   0.0, 1.0));
           }
 
-          float halfW = baseHalfW;
+          // Branches (rid != 0) optionally render wider than the trunk, so
+          // a saturated narrow spine + soft pale halo branches match the
+          // figma-svg merge look. Trunk always uses the base width.
+          float bodyHalfW = (rid != 0) ? baseHalfW * max(uBranchWidthScale, 0.01)
+                                       : baseHalfW;
+          float halfW = bodyHalfW;
           if (uConvergenceMode > 0.5 && uConvergenceTaper > 0.0) {
             // Width follows the loop phase: full width during spread
             // segments, narrowed during the merge segments. Slider at 1
@@ -861,7 +889,7 @@ const mat = new THREE.ShaderMaterial({
             const float MIN_FACTOR = 0.15;
             float phase  = mix(phaseStart, phaseEnd, t);
             float factor = mix(1.0, MIN_FACTOR, uConvergenceTaper * phase);
-            halfW = baseHalfW * factor;
+            halfW = bodyHalfW * factor;
           }
 
           vec2  edges  = ribbonEdges(y1, y2, t, halfW);
@@ -890,8 +918,21 @@ const mat = new THREE.ShaderMaterial({
           // shoulder (du≤1) plus a small margin for the gaussian halo.
           if (abs(dY) > hHalfT * 1.5) continue;
 
-          float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0)
-                           ? clamp(uColorMergeTaper * mix(phaseSoftStart, phaseSoftEnd, t), 0.0, 1.0)
+          // Trunk-exempt mode: rid 0 keeps its base colour through the
+          // entire cycle. Matches Railway's brand reading where the
+          // mainline is always "shipped"/stable and only branches wash
+          // toward the calm tint at the merge.
+          bool exemptTrunk = (uColorMergeTrunkExempt > 0.5) && (rid == 0);
+          // Ease the wash so the cream tint is already visible the
+          // moment the bend begins (instead of ramping linearly from 0
+          // and only becoming readable near the end of the bend). The
+          // power is uColorMergeCurve: 1.0 = linear (original), 0.5 =
+          // strong easeOut (fast start), 2.0 = easeIn (slow start).
+          float colorMixRaw = mix(phaseSoftStart, phaseSoftEnd, t);
+          float colorMixEased = pow(clamp(colorMixRaw, 0.0, 1.0),
+                                    max(uColorMergeCurve, 0.05));
+          float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0 && !exemptTrunk)
+                           ? clamp(uColorMergeTaper * colorMixEased, 0.0, 1.0)
                            : 0.0;
           vec3 ridSat  = mix(laneColor(rid),    uMergeTintColor, colorMix);
           vec3 ridShl  = mix(laneShoulder(rid), uMergeTintColor, colorMix);
@@ -1561,9 +1602,12 @@ function _applyConfigCore(skipMinimap) {
   mat.uniforms.uConvergenceTaper.value = CONFIG.convergenceTaper;
   mat.uniforms.uColorMergeTaper.value  = CONFIG.colorMergeTaper ?? 0;
   mat.uniforms.uMergeTintColor.value.set(CONFIG.mergeTintColor || '#C9C6BC');
+  mat.uniforms.uColorMergeTrunkExempt.value = CONFIG.colorMergeTrunkExempt ? 1 : 0;
+  mat.uniforms.uColorMergeCurve.value       = CONFIG.colorMergeCurve ?? 1;
   mat.uniforms.uTrunkOnTop.value     = CONFIG.trunkOnTop ? 1 : 0;
   mat.uniforms.uMergeAlphaFade.value = CONFIG.mergeAlphaFade ?? 0;
-  mat.uniforms.uBendSpread.value     = CONFIG.bendSpread ?? 0;
+  mat.uniforms.uBendSpread.value       = CONFIG.bendSpread ?? 0;
+  mat.uniforms.uBranchWidthScale.value = CONFIG.branchWidthScale ?? 1;
 
   mat.uniforms.uPhaseEnabled.value  = (CONFIG.simMode === 'phasing') ? 1 : 0;
   mat.uniforms.uPhaseSpacing.value  = CONFIG.phasePillSpacing;

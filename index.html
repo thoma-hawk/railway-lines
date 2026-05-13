@@ -281,12 +281,18 @@
           <div class="preset-hint">Spreads the colour transition across neighbouring segments. 0 = blend only inside the bend; 1 = blend bleeds ≈6 segments to either side, so colours start fusing well before the junction.</div>
           <label>Merge tint <input type="color" data-k="mergeTintColor"></label>
           <div class="preset-hint">Shared shade every rail washes toward at the junction. Pick something close to the background (default #C9C6BC) so rails dissolve into a pale ribbon at the merge instead of one colour visibly overtaking another.</div>
+          <label><input type="checkbox" data-k="colorMergeTrunkExempt"> Trunk exempt from colour wash</label>
+          <div class="preset-hint">When on, rail 0 (the trunk) keeps its base colour through the entire cycle — only branches wash toward the merge tint. Matches Railway's brand reading: trunk = always-shipped mainline; branches = active work calming to the shipped state at the merge.</div>
+          <label>Wash curve <input type="range" min="0.1" max="3" step="0.05" data-k="colorMergeCurve"><span data-v="colorMergeCurve"></span></label>
+          <div class="preset-hint">Shape of the colour wash inside a bend. 1 = linear (cream only fully visible at the bend's end). &lt; 1 = easeOut (cream readable immediately the rail starts curving — calmness arrives early). &gt; 1 = easeIn (cream held back until the bend completes).</div>
           <label><input type="checkbox" data-k="trunkOnTop"> Trunk on top</label>
           <div class="preset-hint">When on, rail 0 (the always-present trunk) composites over the split rails — greens recede behind the yellow at the merge instead of covering it.</div>
           <label>Branch fade <input type="range" min="0" max="1" step="0.01" data-k="mergeAlphaFade"><span data-v="mergeAlphaFade"></span></label>
           <div class="preset-hint">Fades non-trunk rails to transparent at the junction so they "grow out of" the trunk gradually instead of popping in as a sharp wedge. Combine with Blend softness to spread the fade across multiple segments.</div>
           <label>Bend spread <input type="range" min="0" max="1" step="0.01" data-k="bendSpread"><span data-v="bendSpread"></span></label>
           <div class="preset-hint">Pulls non-trunk rails toward the trunk's lane by the softened phase, so the visible bend stretches across many segments instead of being confined to the one bend segment. Raise Blend softness to widen the zone the pull operates over.</div>
+          <label>Branch width <input type="range" min="0.1" max="5" step="0.05" data-k="branchWidthScale"><span data-v="branchWidthScale"></span></label>
+          <div class="preset-hint">Width multiplier for non-trunk rails. 1 = same width as the trunk; 2.5–3 = wider, softer "halo" branches that match the figma-svg merge look (sharp saturated spine + blurred pale fade-ins). Trunk width is untouched.</div>
         </div>
         <div id="draw-only" class="sub-block">
           <div class="sub-head">Draw</div>
@@ -475,8 +481,8 @@
   <!-- JSZip — used as a fallback when the File System Access API isn't
        available (Firefox / Safari) so the export bundles into one .zip. -->
   <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="sim.js?v=64"></script>
-  <script src="app-three.js?v=64"></script>
+  <script src="sim.js?v=67"></script>
+  <script src="app-three.js?v=67"></script>
   <!-- Deploy overlay: GSAP-driven gradient sweep on top of the engine. -->
   <script src="deploy-anim/vendor/gsap.min.js"></script>
   <script src="deploy-overlay.js"></script>
