@@ -56,6 +56,18 @@ const CONFIG = {
   //       0.61/0.9/1.0). railSoft / railSigma are unused in this mode.
   railProfile:        0,
   laneShoulderColors: defaultLaneColors(MAX_LANE_BUCKETS),
+  // Per-rail shoulder opacity — same effect as colorTimeline's per-stop
+  // shoulderOpacity, but bound to a specific rail id (rather than a
+  // loop position). Lets one preset have e.g. a watery pale trunk
+  // (rid 0 → 0.5) alongside a solid blue branch (rid 1 → 1.0) at the
+  // same wx. Default 1.0 across all rails so older presets unchanged.
+  laneShoulderOpacities: new Array(MAX_LANE_BUCKETS).fill(1),
+  // Per-rail edge colour — same effect as colorTimeline's per-stop edge,
+  // but bound to a specific rail id. Matches the figma source where
+  // each rail-state's gradient has its own edge tint (`#E7E5DD` for pale,
+  // `#C9C6BC` for saturated). Default to bg-tinted so older presets
+  // render identically.
+  laneEdgeColors:     new Array(MAX_LANE_BUCKETS).fill('#F1EFE8'),
   railEdgeColor:      '#C9C6BC',
   // Figma profile thresholds (only meaningful when railProfile === 'figma').
   // Both in normalized 0..1 of the rail's half-thickness (du), 0 = center,
@@ -188,6 +200,12 @@ const CONFIG = {
   // figma-svg look where merging rails are desaturated halos approaching
   // a saturated spine.
   branchWidthScale: 1.0,
+  // Per-rail width multiplier override — when an entry is > 0 it
+  // overrides `branchWidthScale` for that rail id. Lets a preset have
+  // e.g. a thin red rail (rid 2 → 0.12) alongside a normal-width blue
+  // rail (rid 1 → 1.0) in the same render. Empty / NaN / ≤0 entries
+  // fall back to `branchWidthScale`. Rail 0 (trunk) is never scaled.
+  branchWidthScales: new Array(MAX_LANE_BUCKETS).fill(0),
 
   // Colour timeline — when enabled, every rail's body colour follows
   // keyframes anchored to the loop's normalised position (0..1). The
@@ -243,6 +261,31 @@ const CONFIG = {
   // reads as one continuous fused body that smoothly widens from
   // trunk to N branches instead of N independent ribbons.
   mergeUnion: false,
+
+  // Reverse the non-trunk paint order — when off (default) rid 1
+  // paints first / behind, rid 2 in front, …, trunk last. When on,
+  // the loop walks high→low so a higher-rid rail still paints behind
+  // a lower-rid rail. Lets the high_cpu story spawn blue AFTER red
+  // (so blue can use a normal SPLIT bend that mirrors its MERGE
+  // back) while keeping blue behind red visually.
+  reversePaintOrder: false,
+
+  // Per-rail phase — when on, the colour-wash + alpha-fade phase for
+  // each bend is computed from the rail's OWN distance from the trunk
+  // lane (y=0), not from the global per-seg phase. Makes a SPLIT or
+  // MERGE bend always show a 1→0 (emergence) or 0→1 (return) phase
+  // transition regardless of what other rails are doing — fixes the
+  // high_cpu case where blue's emergence at seg 8 had phase 0→0
+  // (no wash) because red was already spread.
+  perRailPhase: false,
+  // World-Y reference for the per-rail phase normalisation. phase = 1
+  // when |y| = 0 (trunk), phase = 0 when |y| ≥ phaseRangeY. Set to 0
+  // (default) for auto-detection — the renderer scans the active sim
+  // and uses the max |y| any rail reaches across the loop, so changing
+  // laneSpace or lane assignments Just Works. Set a positive value to
+  // override (e.g. force a wider phase range than the sim actually
+  // produces, to soften the wash).
+  phaseRangeY: 0,
 
   // Topology drawing — when true, dragging in the minimap adds a MERGE
   // event to the active scripted-mode (or draw-mode) timeline. Click-to-
@@ -563,6 +606,11 @@ const mat = new THREE.ShaderMaterial({
     uMergeAlphaFade:     { value: CONFIG.mergeAlphaFade ?? 0 },
     uBendSpread:         { value: CONFIG.bendSpread ?? 0 },
     uBranchWidthScale:   { value: CONFIG.branchWidthScale ?? 1 },
+    // Per-rail overrides: width scale (0 = fall back to uBranchWidthScale),
+    // shoulder opacity, and edge colour. Indexed by rail id.
+    uBranchWidthScales:      { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uLaneShoulderOpacities:  { value: new Float32Array(MAX_LANE_BUCKETS).fill(1) },
+    uLaneEdgeColors:         { value: Array.from({ length: MAX_LANE_BUCKETS }, () => new THREE.Color('#F1EFE8')) },
 
     // Colour timeline — keyframes anchored to loop position. Up to 16
     // stops; sampleTimeline() in the shader does the lerp.
@@ -585,7 +633,14 @@ const mat = new THREE.ShaderMaterial({
     uContainerHalfW:    { value: CONFIG.containerHalfW ?? 90 },
 
     // Merge union — single-shape MAX-alpha compositing across all rails.
-    uMergeUnion: { value: CONFIG.mergeUnion ? 1 : 0 },
+    uMergeUnion:         { value: CONFIG.mergeUnion ? 1 : 0 },
+    uReversePaintOrder:  { value: CONFIG.reversePaintOrder ? 1 : 0 },
+    // Per-rail phase mode + the world-Y reference for normalising
+    // phase (= max spread distance from trunk lane). Set in
+    // _applyConfigCore based on the laneSpace and a reasonable
+    // multiplier; the shader normalises |y| / uPhaseRangeY.
+    uPerRailPhase:       { value: CONFIG.perRailPhase ? 1 : 0 },
+    uPhaseRangeY:        { value: 360 },
 
     uSegPhases:        { value: segPhaseArray },
     uSegPhasesSoft:    { value: segPhaseSoftArray },
@@ -677,6 +732,10 @@ const mat = new THREE.ShaderMaterial({
     uniform float uMergeAlphaFade;
     uniform float uBendSpread;
     uniform float uBranchWidthScale;
+    // Per-rail overrides (size matches MAX_LANE_BUCKETS = 9).
+    uniform float uBranchWidthScales[9];
+    uniform float uLaneShoulderOpacities[9];
+    uniform vec3  uLaneEdgeColors[9];
     // Colour timeline — up to 16 stops, lerped by loop position. When
     // uColorTimelineEnabled > 0.5 the rail's base colours come from this
     // table instead of laneColor(rid) / laneShoulder(rid).
@@ -702,6 +761,12 @@ const mat = new THREE.ShaderMaterial({
     // the seams between overlapping soft-edged rails so the merge
     // bend reads as one fused body widening from trunk to branches.
     uniform float uMergeUnion;
+    // When > 0.5, paint non-trunk rails high-rid → low-rid (default
+    // is low-rid → high-rid). Lets a higher-numbered rail paint
+    // behind a lower-numbered one without changing event order.
+    uniform float uReversePaintOrder;
+    uniform float uPerRailPhase;
+    uniform float uPhaseRangeY;
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
@@ -1031,20 +1096,45 @@ const mat = new THREE.ShaderMaterial({
           float t  = (wx - sx) / uSegW;
           if (t < 0.0 || t >= 1.0) continue;
 
+          // Per-rail phase override: local copies so each rail in this
+          // seg computes its own phase from its own y1/y2, without
+          // bleeding into the next rail's phase. When uPerRailPhase
+          // is off, fall back to the global per-seg phase.
+          float rPhaseStart     = phaseStart;
+          float rPhaseEnd       = phaseEnd;
+          float rPhaseSoftStart = phaseSoftStart;
+          float rPhaseSoftEnd   = phaseSoftEnd;
+          if (uPerRailPhase > 0.5 && uPhaseRangeY > 0.0) {
+            rPhaseStart     = 1.0 - clamp(abs(y1) / uPhaseRangeY, 0.0, 1.0);
+            rPhaseEnd       = 1.0 - clamp(abs(y2) / uPhaseRangeY, 0.0, 1.0);
+            rPhaseSoftStart = rPhaseStart;
+            rPhaseSoftEnd   = rPhaseEnd;
+          }
+
           // Pull non-trunk rails toward the trunk's lane (Y = 0) by the
           // softened phase, so the visible bend stretches across many
           // segments instead of being confined to the one segment where
           // the SPLIT/MERGE event fires. uSegPhasesSoft is continuous
           // across segment boundaries, so y1/y2 stay continuous too.
           if (rid != 0 && uConvergenceMode > 0.5 && uBendSpread > 0.0) {
-            y1 = mix(y1, 0.0, clamp(uBendSpread * phaseSoftStart, 0.0, 1.0));
-            y2 = mix(y2, 0.0, clamp(uBendSpread * phaseSoftEnd,   0.0, 1.0));
+            y1 = mix(y1, 0.0, clamp(uBendSpread * rPhaseSoftStart, 0.0, 1.0));
+            y2 = mix(y2, 0.0, clamp(uBendSpread * rPhaseSoftEnd,   0.0, 1.0));
           }
 
           // Branches (rid != 0) optionally render wider than the trunk, so
           // a saturated narrow spine + soft pale halo branches match the
           // figma-svg merge look. Trunk always uses the base width.
-          float bodyHalfW = (rid != 0) ? baseHalfW * max(uBranchWidthScale, 0.01)
+          // Per-rail override: if uBranchWidthScales[rid] > 0 it wins,
+          // otherwise fall back to the global uBranchWidthScale.
+          float widthScale = uBranchWidthScale;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) {
+              float v = uBranchWidthScales[k];
+              if (v > 0.0001) widthScale = v;
+              break;
+            }
+          }
+          float bodyHalfW = (rid != 0) ? baseHalfW * max(widthScale, 0.01)
                                        : baseHalfW;
           float halfW = bodyHalfW;
           if (uConvergenceMode > 0.5 && uConvergenceTaper > 0.0) {
@@ -1053,7 +1143,7 @@ const mat = new THREE.ShaderMaterial({
             // narrows to MIN_FACTOR (not zero) so rails stay visible
             // through the merge. Interpolates across bends via t.
             const float MIN_FACTOR = 0.15;
-            float phase  = mix(phaseStart, phaseEnd, t);
+            float phase  = mix(rPhaseStart, rPhaseEnd, t);
             float factor = mix(1.0, MIN_FACTOR, uConvergenceTaper * phase);
             halfW = bodyHalfW * factor;
           }
@@ -1111,7 +1201,7 @@ const mat = new THREE.ShaderMaterial({
           // and only becoming readable near the end of the bend). The
           // power is uColorMergeCurve: 1.0 = linear (original), 0.5 =
           // strong easeOut (fast start), 2.0 = easeIn (slow start).
-          float colorMixRaw = mix(phaseSoftStart, phaseSoftEnd, t);
+          float colorMixRaw = mix(rPhaseSoftStart, rPhaseSoftEnd, t);
           float colorMixEased = pow(clamp(colorMixRaw, 0.0, 1.0),
                                     max(uColorMergeCurve, 0.05));
           float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0 && !exemptTrunk)
@@ -1121,8 +1211,19 @@ const mat = new THREE.ShaderMaterial({
           // colour timeline sampled by this fragment's loop position.
           vec3 baseCore = laneColor(rid);
           vec3 baseShl  = laneShoulder(rid);
+          // Per-rail shoulder opacity + edge colour defaults — used when
+          // the colour timeline is disabled, so each rail can have its
+          // own figma-stop treatment (e.g. pale rid 0 with 0.5 shoulder
+          // alongside solid blue rid 1 with 1.0 shoulder).
           float shoulderOpacity = 1.0;
           vec3 baseEdge = uRailEdgeColor;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) {
+              shoulderOpacity = uLaneShoulderOpacities[k];
+              baseEdge        = uLaneEdgeColors[k];
+              break;
+            }
+          }
           if (uColorTimelineEnabled > 0.5 && uLoopLen > 0.0) {
             float loopT = fract(wx / uLoopLen);
             // Per-rail offset on the timeline lookup — lets each rail
@@ -1178,7 +1279,7 @@ const mat = new THREE.ShaderMaterial({
           // Uses the softened phase so the fade extends gently across
           // neighbouring segments when Blend softness is up.
           if (rid != 0 && uConvergenceMode > 0.5 && uMergeAlphaFade > 0.0) {
-            alpha *= 1.0 - clamp(uMergeAlphaFade * mix(phaseSoftStart, phaseSoftEnd, t), 0.0, 1.0);
+            alpha *= 1.0 - clamp(uMergeAlphaFade * mix(rPhaseSoftStart, rPhaseSoftEnd, t), 0.0, 1.0);
           }
           // Save raw alpha (before tick gap) so the tick painter can mask
           // its colour to "where the rail would have been", and only then
@@ -1233,19 +1334,34 @@ const mat = new THREE.ShaderMaterial({
       } else {
         // Pass 1: composite rails 1..N (non-trunk) first when trunk-on-top
         // is on, so the trunk paints over the greens. When off, just walk
-        // 0..N in order (original behaviour).
+        // 0..N in order (original behaviour). uReversePaintOrder walks
+        // high->low so a higher-rid rail paints first (behind a lower-rid
+        // rail) - used by the high_cpu story.
         int startI = (uTrunkOnTop > 0.5) ? 1 : 0;
-        for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
-          if (i < startI) continue;
-          float a = laneCov[i];
-          if (a < 1e-4) continue;
-          // Both profiles now write the per-fragment color (post merge-taper
-          // colour blend) into laneCol[i] at write time, so composite from
-          // there regardless of profile.
-          vec3 src     = laneCol[i];
-          vec3 blended = blendOp(dst, src, uBlendMode);
-          dst = mix(dst, blended, a);
-          if (a > maxA) maxA = a;
+        if (uReversePaintOrder > 0.5) {
+          for (int j = 0; j < MAX_LANE_BUCKETS; j++) {
+            int i = MAX_LANE_BUCKETS - 1 - j;
+            if (i < startI) continue;
+            float a = laneCov[i];
+            if (a < 1e-4) continue;
+            vec3 src     = laneCol[i];
+            vec3 blended = blendOp(dst, src, uBlendMode);
+            dst = mix(dst, blended, a);
+            if (a > maxA) maxA = a;
+          }
+        } else {
+          for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
+            if (i < startI) continue;
+            float a = laneCov[i];
+            if (a < 1e-4) continue;
+            // Both profiles now write the per-fragment color (post merge-taper
+            // colour blend) into laneCol[i] at write time, so composite from
+            // there regardless of profile.
+            vec3 src     = laneCol[i];
+            vec3 blended = blendOp(dst, src, uBlendMode);
+            dst = mix(dst, blended, a);
+            if (a > maxA) maxA = a;
+          }
         }
         // Pass 2: rail 0 last (on top) when trunk-on-top is on. Forces
         // *normal* blend for the trunk regardless of the global blend mode —
@@ -1840,6 +1956,36 @@ function pushContainersToUniforms() {
   mat.uniforms.uContainerOffset.value   = Number(CONFIG.containerOffset) || 0;
   mat.uniforms.uContainerHalfW.value    = Math.max(0.5, Number(CONFIG.containerHalfW) || 90);
   mat.uniforms.uMergeUnion.value        = CONFIG.mergeUnion ? 1 : 0;
+  mat.uniforms.uReversePaintOrder.value = CONFIG.reversePaintOrder ? 1 : 0;
+  mat.uniforms.uPerRailPhase.value      = CONFIG.perRailPhase ? 1 : 0;
+  // phaseRangeY is computed AFTER rebuildLaneData (which calls
+  // SIM.setLaneSpace and refreshes the sim's connection cache), so
+  // delegate to pushPhaseRangeY().
+}
+
+// Phase-range Y — if CONFIG.phaseRangeY is positive use it directly,
+// otherwise auto-detect the max |y| any rail reaches across the loop.
+// Called AFTER SIM has been reconfigured + lane data rebuilt.
+function pushPhaseRangeY() {
+  const explicit = Number(CONFIG.phaseRangeY) || 0;
+  if (explicit > 0) {
+    mat.uniforms.uPhaseRangeY.value = explicit;
+    return;
+  }
+  let maxAbsY = 0;
+  if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
+    const loopLen = SIM.LOOP_SEGS || CONFIG.loopSegs || 1;
+    for (let s = 0; s < loopLen; s++) {
+      const conns = SIM.connectionsAt(s);
+      for (const c of conns) {
+        const a1 = Math.abs(SIM.laneToY(c.y1));
+        const a2 = Math.abs(SIM.laneToY(c.y2));
+        if (a1 > maxAbsY) maxAbsY = a1;
+        if (a2 > maxAbsY) maxAbsY = a2;
+      }
+    }
+  }
+  mat.uniforms.uPhaseRangeY.value = (maxAbsY > 0.5) ? maxAbsY : 360;
 }
 
 function _applyConfigCore(skipMinimap) {
@@ -1865,6 +2011,17 @@ function _applyConfigCore(skipMinimap) {
     mat.uniforms.uLaneShoulder.value[i].set(hex);
   }
   mat.uniforms.uRailEdgeColor.value.set(CONFIG.railEdgeColor || '#C9C6BC');
+  // Per-rail shoulder-opacity + edge colour overrides.
+  const laneShOp = Array.isArray(CONFIG.laneShoulderOpacities) ? CONFIG.laneShoulderOpacities : [];
+  const laneEdge = Array.isArray(CONFIG.laneEdgeColors)        ? CONFIG.laneEdgeColors        : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    const v = Number(laneShOp[i]);
+    mat.uniforms.uLaneShoulderOpacities.value[i] =
+      (Number.isFinite(v) && v >= 0) ? Math.min(1, v) : 1;
+    mat.uniforms.uLaneEdgeColors.value[i].set(
+      laneEdge[i] || CONFIG.railEdgeColor || '#F1EFE8'
+    );
+  }
   mat.uniforms.uProfileCore.value     = (typeof CONFIG.profileCore     === 'number') ? CONFIG.profileCore     : 0.22;
   mat.uniforms.uProfileShoulder.value = (typeof CONFIG.profileShoulder === 'number') ? CONFIG.profileShoulder : 0.80;
   mat.uniforms.uSegW.value             = CONFIG.segW;
@@ -1916,6 +2073,12 @@ function _applyConfigCore(skipMinimap) {
   mat.uniforms.uMergeAlphaFade.value = CONFIG.mergeAlphaFade ?? 0;
   mat.uniforms.uBendSpread.value       = CONFIG.bendSpread ?? 0;
   mat.uniforms.uBranchWidthScale.value = CONFIG.branchWidthScale ?? 1;
+  const branchScales = Array.isArray(CONFIG.branchWidthScales) ? CONFIG.branchWidthScales : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    const v = Number(branchScales[i]);
+    // 0 (or non-finite) means "use the global branchWidthScale".
+    mat.uniforms.uBranchWidthScales.value[i] = (Number.isFinite(v) && v > 0) ? v : 0;
+  }
 
   // Colour timeline — clamp + sort + push the up-to-16 keyframes into
   // the shader uniform arrays. Loop length comes from sim params so the
@@ -1971,6 +2134,7 @@ function _applyConfigCore(skipMinimap) {
   SIM.setMode(CONFIG.simMode === 'deploy' ? 'draw' : CONFIG.simMode);
   recomputePhaseRange();
   rebuildLaneData();
+  pushPhaseRangeY();
 
   renderer.setClearColor(new THREE.Color(CONFIG.bgColor));
 

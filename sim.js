@@ -70,6 +70,33 @@ const SIM = (() => {
       { seg: 12, type: 'MERGE', from: 4, to: 3 },
       { seg: 12, type: 'MERGE', from: 2, to: 3 },
     ],
+    // High-CPU story — trunk pale, thin red branch, fat blue branch.
+    // Z-order requirement: blue painted BEHIND red. Our paint loop walks
+    // non-trunk rails low→high rid, so the rid we want behind needs to
+    // be the lower one. Red bends first in time, blue second — but rids
+    // are assigned in spawn order. To get blue=rid 1 (paints first =
+    // behind) while making blue's *visible bend* happen second, we
+    // SPAWN blue immediately at the trunk's lane (rid 1 parked on the
+    // trunk, invisible because trunk-on-top covers it), then relocate
+    // it to the top lane later via MERGE — which IS its visible bend.
+    //   seg 0  INIT     trunk at lane 4 → rid 0
+    //   seg 2  SPLIT    trunk → lane 4 (clone on trunk) → rid 1 (blue),
+    //                   invisible while it overlaps the trunk
+    //   seg 5  SPLIT    trunk → lane 2 → rid 2 (red) bends UP visibly
+    //   seg 8  MERGE    rid 1: lane 4 → lane 1 (blue bends UP behind red)
+    //   seg 16 MERGE    rid 2: lane 2 → lane 4 (red bends back, absorbed)
+    //   seg 22 MERGE    rid 1: lane 1 → lane 4 (blue bends back, absorbed)
+    // Loop wraps; next cycle re-runs without INIT (sim filters that out)
+    // so absorbed rids are reused via nextAvailableId.
+    // Note: trunkOnTop MUST be true in the preset, otherwise rid 1
+    // would bleed through the trunk during segs 2→8.
+    high_cpu: [
+      { seg: 0,  type: 'INIT',  from: 3 },
+      { seg: 5,  type: 'SPLIT', from: 3, to: 5 },                                       // rid 1 = red, bends UP (paints in front under reverse order)
+      { seg: 8,  type: 'SPLIT', from: 3, to: 5 },                                       // rid 2 = blue, bends UP (paints behind red under reverse order)
+      { seg: 16, type: 'END',   from: 5, railId: 1 },                                   // red dead-ends
+      { seg: 22, type: 'MERGE', from: 5, to: 3, railId: 2 },                            // blue MERGE back — mirror of seg 8's SPLIT bend
+    ],
   };
 
   let ACTIVE = SCRIPTS.v1;
@@ -375,18 +402,53 @@ const SIM = (() => {
       const la = parseFloat(ev.from);
       const lb = ev.to !== undefined ? parseFloat(ev.to) : NaN;
       if (!Number.isFinite(la) || !Number.isFinite(lb) || lb < 0 || lb >= LANE_COUNT) continue;
-      const rail = rails.find(r => r.lane === la && !handled.has(r.id));
+      // Optional `railId` disambiguates when multiple rails share `from`
+      // (e.g. high_cpu parks a rail on the trunk's lane). When present,
+      // only the matching rail id is moved; the trunk stays put.
+      const hasRailId = (ev.railId != null) && Number.isFinite(Number(ev.railId));
+      const want      = hasRailId ? Number(ev.railId) : null;
+      const rail = rails.find(r =>
+        r.lane === la
+        && !handled.has(r.id)
+        && (!hasRailId || r.id === want));
       if (!rail) continue;
       conns.push({ id: rail.id, y1: la, y2: lb });
       handled.add(rail.id);
       const erIdx = endRails.findIndex(r => r.id === rail.id);
       if (erIdx < 0) continue;
       const otherAtDest = endRails.some((r, i) => i !== erIdx && r.lane === lb);
-      if (otherAtDest) {
+      // `allowOverlap: true` forces a relocate even when another rail
+      // ends at the same destination — used by high_cpu so the blue
+      // can park on top of the red (same lane, deliberately overlapped
+      // so blue draws behind red at the same visual height).
+      if (otherAtDest && !ev.allowOverlap) {
         endRails.splice(erIdx, 1);            // absorbed
       } else {
-        endRails[erIdx].lane = lb;            // relocated
+        endRails[erIdx].lane = lb;            // relocated (may overlap)
       }
+    }
+
+    // END events: terminate a rail at its current lane without
+    // emitting any conn for this seg — gives a clean dead-end
+    // (no bend back to trunk, no absorption visual). Pairs with
+    // `railId` so the END targets a specific rail.
+    for (const ev of events) {
+      if (String(ev.type).toUpperCase() !== 'END') continue;
+      const hasRailId = (ev.railId != null) && Number.isFinite(Number(ev.railId));
+      const want      = hasRailId ? Number(ev.railId) : null;
+      const la        = parseFloat(ev.from);
+      const rail = rails.find(r =>
+        (!hasRailId || r.id === want)
+        && (!Number.isFinite(la) || r.lane === la)
+        && !handled.has(r.id));
+      if (!rail) continue;
+      // Mark as handled so the pass-through loop below doesn't emit a
+      // straight conn. Don't push any conn — the rail simply vanishes
+      // at the start of this seg. Removing it from endRails frees its
+      // ID for re-use on the next loop iteration.
+      handled.add(rail.id);
+      const erIdx = endRails.findIndex(r => r.id === rail.id);
+      if (erIdx >= 0) endRails.splice(erIdx, 1);
     }
 
     // Pass-through — every rail without a custom conn goes straight.
