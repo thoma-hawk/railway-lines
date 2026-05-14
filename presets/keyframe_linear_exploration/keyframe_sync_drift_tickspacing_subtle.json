@@ -1,0 +1,108 @@
+{
+  "speed": 8750,
+  "viewZoom": 1.2,
+  "segW": 3500,
+  "laneSpace": 106,
+  "railWidth": 50,
+  "railSoft": 0,
+  "railSigma": 0.2,
+  "railOpacity": 0.9,
+  "bgColor": "#F1EFE8",
+  "railProfile": "figma",
+  "laneShoulderColors": [
+    "#D8D2CB", "#D8D2CB", "#D8D2CB", "#D8D2CB", "#D8D2CB",
+    "#D8D2CB", "#D8D2CB", "#D8D2CB", "#D8D2CB"
+  ],
+  "railEdgeColor": "#f1efe8",
+  "profileCore": 0.2,
+  "profileShoulder": 0.8,
+  "blendMode": "darken",
+  "laneColors": [
+    "#A8A4A0", "#A8A4A0", "#A8A4A0", "#A8A4A0", "#A8A4A0",
+    "#A8A4A0", "#A8A4A0", "#A8A4A0", "#A8A4A0"
+  ],
+  "paletteHueOffset": 0,
+  "paletteSat": 0.62,
+  "paletteLight": 0.5,
+
+  "tickAmount": 1,
+  "tickSpacing": 150,
+  "tickWidth": 2,
+  "tickColor": "#f1efe8",
+  "tickMotionBlur": 0,
+
+  "inkTrapAmount": 0,
+  "inkTrapSpacing": 1050,
+  "inkTrapDensity": 0.45,
+  "inkTrapWidth": 368,
+  "inkTrapDirection": 0.28,
+
+  "burstAmount": 0,
+  "burstDensity": 0.29,
+  "burstCell": 2000,
+  "burstLenMin": 0.55,
+  "burstLenMax": 0.85,
+  "burstSpeed": 5000,
+  "burstRailSpread": 0.53,
+  "burstColor": "#DE4D0E",
+  "burstLockToRail": true,
+
+  "phasePillSpacing": 137,
+  "phasePillLength": 19,
+  "phasePillHeight": 68,
+  "phasePillOpacityA": 1,
+  "phaseColorA": "#a2a792",
+
+  "convergencePattern": "adjacent",
+  "convergenceTaper": 0,
+  "colorMergeTaper": 0,
+  "colorMergeSoftness": 0,
+  "mergeTintColor": "#f1efe8",
+  "trunkOnTop": false,
+  "mergeAlphaFade": 0,
+  "bendSpread": 0,
+
+  "containersEnabled": false,
+
+  "minimapDrawMode": false,
+  "userEvents": [],
+  "drawInitLanes": "0 3 6",
+  "simMode": "procedural",
+  "simScript": "parallel",
+  "loopSegs": 30,
+  "seed": 1,
+  "mergeChance": 0.24,
+  "splitChance": 0.22,
+  "spawnChance": 0.2,
+  "endChance": 0.05,
+  "maxTracks": 3,
+
+  "exportFrames": 720,
+  "exportFps": 60,
+  "exportWidth": 1920,
+  "exportHeight": 1080,
+  "aspectLock": true,
+  "targetFps": 60,
+  "cameraPixelSnap": true,
+
+  "modulators": [
+    {
+      "target": "tickSpacing",
+      "min": 148,
+      "max": 158,
+      "cycle": 12,
+      "waveform": "keyframes",
+      "enabled": true,
+      "t": 0,
+      "keyframes": [
+        { "t": 0.0,  "v": 150, "ease": "linear"    },
+        { "t": 4.0,  "v": 150, "ease": "easeInOut" },
+        { "t": 5.0,  "v": 152, "ease": "easeInOut" },
+        { "t": 6.0,  "v": 156, "ease": "easeInOut" },
+        { "t": 7.0,  "v": 152, "ease": "easeInOut" },
+        { "t": 8.0,  "v": 150, "ease": "easeInOut" },
+        { "t": 12.0, "v": 150                       }
+      ]
+    }
+  ]
+}

@@ -50,6 +50,26 @@ const SIM = (() => {
       { seg: 12, type: 'MERGE', from: 2, to: 3 },
       { seg: 12, type: 'MERGE', from: 4, to: 3 },
     ],
+    // Single rail in, splits to two branches that run parallel, then
+    // merges back to one rail. No persistent trunk through the middle
+    // — the trunk relocates into one branch at the split, and absorbs
+    // back at the merge. Matches the svg/containers/v2 reference where
+    // you see exactly two rails diverging and converging.
+    //   SPLIT first: spawn rid 1 at lane 4 (rid 0 still at lane 3).
+    //   MERGE next : relocate rid 0 from lane 3 → lane 2.
+    // After seg 4: rid 0 at lane 2, rid 1 at lane 4 (no rail at trunk).
+    //   MERGE 4→3 : relocate rid 1 to lane 3.
+    //   MERGE 2→3 : rid 0 collides with rid 1 → absorbed (removed).
+    // After seg 12: rid 1 alone at lane 3. The next loop's INIT spawns
+    // a fresh rail at lane 3; sim absorbs the duplicate so the cycle
+    // restabilises.
+    container_loop: [
+      { seg: 0,  type: 'INIT',  from: 3 },
+      { seg: 4,  type: 'SPLIT', from: 3, to: 4 },
+      { seg: 4,  type: 'MERGE', from: 3, to: 2 },
+      { seg: 12, type: 'MERGE', from: 4, to: 3 },
+      { seg: 12, type: 'MERGE', from: 2, to: 3 },
+    ],
   };
 
   let ACTIVE = SCRIPTS.v1;
@@ -294,10 +314,35 @@ const SIM = (() => {
       splitsBySrc.get(la).push(ev);
     }
 
+    // MERGEs whose `from` matches a SPLIT's source at this seg are
+    // "fused" into the SPLIT phase — the trunk bends to the MERGE's
+    // target instead of continuing straight. Lets one seg do single-
+    // rail → two diverging branches with no straight-through trunk
+    // (svg/containers/v2 1→2→1 reference).
+    const fusedMerges = new Set();
+
     for (const [srcLane, evs] of splitsBySrc) {
       const trunk = rails.find(r => r.lane === srcLane && !handled.has(r.id));
       if (!trunk) continue;
-      conns.push({ id: trunk.id, y1: srcLane, y2: srcLane });
+
+      // Look for a MERGE at this seg with the same source lane. First
+      // match wins; the trunk re-routes onto its `to`.
+      let trunkTo = srcLane;
+      for (const ev of events) {
+        if (String(ev.type).toUpperCase() !== 'MERGE') continue;
+        if (parseFloat(ev.from) !== srcLane) continue;
+        const lb = parseFloat(ev.to);
+        if (!Number.isFinite(lb) || lb < 0 || lb >= LANE_COUNT) continue;
+        trunkTo = lb;
+        fusedMerges.add(ev);
+        // Reflect the move in endRails so subsequent events see the
+        // trunk at its new lane.
+        const trunkEr = endRails.find(r => r.id === trunk.id);
+        if (trunkEr) trunkEr.lane = trunkTo;
+        break;
+      }
+
+      conns.push({ id: trunk.id, y1: srcLane, y2: trunkTo });
       handled.add(trunk.id);
 
       const usedIds = new Set([
@@ -323,7 +368,9 @@ const SIM = (() => {
     //   - Relocate: if `to` has no other rail, the merging rail keeps
     //     its ID and just slides to the new lane. Used by convergence
     //     patterns that ping-pong rails between lanes.
+    // Fused-into-SPLIT merges (above) are skipped here.
     for (const ev of events) {
+      if (fusedMerges.has(ev)) continue;
       if (String(ev.type).toUpperCase() !== 'MERGE') continue;
       const la = parseFloat(ev.from);
       const lb = ev.to !== undefined ? parseFloat(ev.to) : NaN;

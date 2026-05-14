@@ -238,6 +238,7 @@
               <option value="v5">v5 — 5-lane splits</option>
               <option value="parallel">parallel — 3 lanes (no splits)</option>
               <option value="merge1">merge1 — single split/merge cycle</option>
+              <option value="container_loop">container_loop — 1 rail → 2 → 1 (no trunk through middle)</option>
             </select>
           </label>
         </div>
@@ -287,6 +288,8 @@
           <div class="preset-hint">Shape of the colour wash inside a bend. 1 = linear (cream only fully visible at the bend's end). &lt; 1 = easeOut (cream readable immediately the rail starts curving — calmness arrives early). &gt; 1 = easeIn (cream held back until the bend completes).</div>
           <label><input type="checkbox" data-k="trunkOnTop"> Trunk on top</label>
           <div class="preset-hint">When on, rail 0 (the always-present trunk) composites over the split rails — greens recede behind the yellow at the merge instead of covering it.</div>
+          <label><input type="checkbox" data-k="mergeUnion"> Merge union</label>
+          <div class="preset-hint">When on, all rails are composited as a single MAX-alpha shape (winner-takes-all colour) instead of per-rail alpha-blending. Removes the internal "seams" that show up where two soft-edged rails overlap, so where the rails converge they read as one continuous fused body. In parallel sections (no overlap) the rails still appear separate. Overrides <i>Trunk on top</i>.</div>
           <label>Branch fade <input type="range" min="0" max="1" step="0.01" data-k="mergeAlphaFade"><span data-v="mergeAlphaFade"></span></label>
           <div class="preset-hint">Fades non-trunk rails to transparent at the junction so they "grow out of" the trunk gradually instead of popping in as a sharp wedge. Combine with Blend softness to spread the fade across multiple segments.</div>
           <label>Bend spread <input type="range" min="0" max="1" step="0.01" data-k="bendSpread"><span data-v="bendSpread"></span></label>
@@ -403,6 +406,15 @@
         </div>
 
         <div class="sub-block">
+          <div class="sub-head">Container hull</div>
+          <label class="mod-toggle"><input type="checkbox" data-k="containersEnabled"> Enable</label>
+          <div class="preset-hint">Saturated ribbon rendered <b>behind</b> the rails. Mirrors the rail topology with each non-trunk rail's centerline pushed outward by <i>Offset</i>, so the hull's funnel flares slightly wider than the rails' funnel (matches svg/containers/v2/container.svg). The trunk lane is never offset.</div>
+          <label>Colour <input type="color" data-k="containerColor"></label>
+          <label>Offset <input type="range" min="0" max="300" step="1" data-k="containerOffset"><span data-v="containerOffset"></span></label>
+          <label>Hull width <input type="range" min="4" max="400" step="1" data-k="containerHalfW"><span data-v="containerHalfW"></span></label>
+        </div>
+
+        <div class="sub-block">
           <div class="sub-head">Ticks (zoetrope)</div>
           <label>Amount <input type="range" min="0" max="1" step="0.01" data-k="tickAmount"><span data-v="tickAmount"></span></label>
           <label>Spacing <input type="range" min="20" max="2000" step="1" data-k="tickSpacing"><span data-v="tickSpacing"></span></label>
@@ -416,15 +428,6 @@
           <div class="preset-hint">0 = use the display's detected refresh rate (auto). Any positive value locks the render loop to that fps via frame-skipping — useful on 120 Hz / ProMotion displays where you want deterministic tick freeze at 60 fps. Snap-to-freeze multiplies by this rate.</div>
           <label><input type="checkbox" data-k="cameraPixelSnap"> Pixel-snap camera motion</label>
           <div class="preset-hint">Rounds the camera's per-frame step to a whole-pixel multiple so ticks land at the same sub-pixel offset every frame — kills the temporal-aliasing flicker on narrow ticks at any speed. A fractional accumulator preserves average speed exactly. Recommended on; turn off only if you're testing extremely slow scroll speeds where the 1-pixel quantum is visible.</div>
-        </div>
-
-        <div class="sub-block">
-          <div class="sub-head">Ink traps</div>
-          <label>Amount <input type="range" min="0" max="400" step="1" data-k="inkTrapAmount"><span data-v="inkTrapAmount"></span></label>
-          <label>Spacing <input type="range" min="100" max="6000" step="10" data-k="inkTrapSpacing"><span data-v="inkTrapSpacing"></span></label>
-          <label>Density <input type="range" min="0" max="1" step="0.01" data-k="inkTrapDensity"><span data-v="inkTrapDensity"></span></label>
-          <label>Width <input type="range" min="20" max="800" step="2" data-k="inkTrapWidth"><span data-v="inkTrapWidth"></span></label>
-          <label>Direction <input type="range" min="0" max="1" step="0.01" data-k="inkTrapDirection"><span data-v="inkTrapDirection"></span></label>
         </div>
 
         <div class="sub-block">
@@ -490,7 +493,7 @@
        available (Firefox / Safari) so the export bundles into one .zip. -->
   <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="sim.js?v=70"></script>
-  <script src="app-three.js?v=70"></script>
+  <script src="app-three.js?v=80"></script>
   <!-- Deploy overlay: GSAP-driven gradient sweep on top of the engine. -->
   <script src="deploy-anim/vendor/gsap.min.js"></script>
   <script src="deploy-overlay.js"></script>

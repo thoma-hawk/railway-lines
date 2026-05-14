@@ -212,6 +212,37 @@ const CONFIG = {
   // turns blue first, then top, then bottom. Length 9 (one per rail
   // bucket); missing entries default to 0.
   colorTimelineRailOffsets: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+  // Per-keyframe shoulder opacity — knocks the shoulder colour toward
+  // the rail edge colour (effectively the bg) when below 1.0, so a stop
+  // can render with a watery/atmospheric shoulder. Matches the figma
+  // gradient stops where pale states have shoulder opacity 0.5 while
+  // saturated states have 1.0. If omitted on a keyframe, defaults to 1.0
+  // so existing presets render exactly as before.
+
+  // Containers — saturated "hull" ribbon drawn BEHIND the rails. Mirrors
+  // the rail topology exactly (same SPLIT/MERGE bends), but each non-
+  // trunk rail's centerline is pushed `containerOffset` world-units
+  // FURTHER AWAY from the trunk (y=0). That makes the container's
+  // funnel flare slightly wider than the rails', so you see a saturated
+  // halo wrapping the rails' outer edges (matches svg/containers/v2/
+  // container.svg). Trunk (rid 0) is never offset — the container's
+  // trunk lane sits exactly under the rail trunk.
+  //
+  // Because the container reuses the live lane buffer, it follows
+  // whatever script is running (v1, merge1, …) with no extra timeline
+  // — the saturated hull appears wherever non-trunk rails exist.
+  containersEnabled: false,
+  containerColor:    '#ABE0BC',  // hull fill (matches v2/container.svg)
+  containerOffset:   40,         // world-units outward push per non-trunk rail
+  containerHalfW:    90,         // hull stroke half-thickness (180 stroke ≈ rail width)
+
+  // Merge union — when on, the rails are composited as a single
+  // MAX-alpha shape (winner-takes-all colour) instead of per-rail
+  // alpha-blending. Eliminates the soft-edge "seams" you see where
+  // two overlapping rails' figma profiles meet, so the merge zone
+  // reads as one continuous fused body that smoothly widens from
+  // trunk to N branches instead of N independent ribbons.
+  mergeUnion: false,
 
   // Topology drawing — when true, dragging in the minimap adds a MERGE
   // event to the active scripted-mode (or draw-mode) timeline. Click-to-
@@ -541,7 +572,20 @@ const mat = new THREE.ShaderMaterial({
     uColorTimelineCores:     { value: Array.from({ length: 16 }, () => new THREE.Color('#000')) },
     uColorTimelineShoulders: { value: Array.from({ length: 16 }, () => new THREE.Color('#000')) },
     uColorTimelineRailOffsets: { value: new Float32Array(9) },
+    uColorTimelineShoulderOpacity: { value: new Float32Array(16).fill(1) },
+    uColorTimelineEdges:    { value: Array.from({ length: 16 }, () => new THREE.Color('#F1EFE8')) },
     uLoopLen:               { value: 45000 },
+
+    // Containers — saturated hull rendered BEHIND the rails. Mirrors
+    // the rail topology with each non-trunk rail's centerline pushed
+    // outward by uContainerOffset.
+    uContainersEnabled: { value: 0 },
+    uContainerColor:    { value: new THREE.Color(CONFIG.containerColor || '#ABE0BC') },
+    uContainerOffset:   { value: CONFIG.containerOffset ?? 40 },
+    uContainerHalfW:    { value: CONFIG.containerHalfW ?? 90 },
+
+    // Merge union — single-shape MAX-alpha compositing across all rails.
+    uMergeUnion: { value: CONFIG.mergeUnion ? 1 : 0 },
 
     uSegPhases:        { value: segPhaseArray },
     uSegPhasesSoft:    { value: segPhaseSoftArray },
@@ -642,7 +686,22 @@ const mat = new THREE.ShaderMaterial({
     uniform vec3  uColorTimelineCores[16];
     uniform vec3  uColorTimelineShoulders[16];
     uniform float uColorTimelineRailOffsets[9];
+    uniform float uColorTimelineShoulderOpacity[16];
+    uniform vec3  uColorTimelineEdges[16];
     uniform float uLoopLen;
+    // Containers — saturated hull drawn BEHIND the rails by mirroring
+    // the rail lane buffer with each non-trunk centerline pushed
+    // outward by uContainerOffset. Solid colour, hard-ish edges
+    // (matches the flat green look in svg/containers/v2/container.svg).
+    uniform float uContainersEnabled;
+    uniform vec3  uContainerColor;
+    uniform float uContainerOffset;
+    uniform float uContainerHalfW;
+    // Merge union — when > 0.5, composite all rails as a single
+    // MAX-alpha shape instead of per-rail alpha-blending. Removes
+    // the seams between overlapping soft-edged rails so the merge
+    // bend reads as one fused body widening from trunk to branches.
+    uniform float uMergeUnion;
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
@@ -775,6 +834,22 @@ const mat = new THREE.ShaderMaterial({
       if (du >= 1.0) return 0.0;
       return 1.0 - (du - sh) / max(1.0 - sh, 0.001);
     }
+    // Figma 6-stop gradient alpha curve with shoulder-opacity support.
+    // Matches the figma stops literally: alpha = 1 in the core zone,
+    // ramps to shoulderOpacity across the core→shoulder transition,
+    // then ramps from shoulderOpacity → 0 across shoulder→edge. With
+    // shoulderOpacity = 1 the result is identical to figmaProfileAlpha
+    // (the original 1→0 ramp from sh to 1.0).
+    float figmaProfileAlphaWithShoulder(float du, float shoulderOpacity) {
+      float co = clamp(uProfileCore, 0.0, 0.99);
+      float sh = clamp(uProfileShoulder, co + 0.001, 1.0);
+      if (du < co)   return 1.0;
+      if (du >= 1.0) return 0.0;
+      if (du < sh) {
+        return mix(1.0, shoulderOpacity, (du - co) / max(sh - co, 0.001));
+      }
+      return mix(shoulderOpacity, 0.0, (du - sh) / max(1.0 - sh, 0.001));
+    }
     vec3 figmaProfileColor(float du, vec3 saturated, vec3 pastel, vec3 edge) {
       float co = clamp(uProfileCore, 0.0, 0.99);
       float sh = clamp(uProfileShoulder, co + 0.001, 1.0);
@@ -860,15 +935,17 @@ const mat = new THREE.ShaderMaterial({
     // Out-of-band values wrap. Holds the first/last stop's value outside
     // the defined span. Lerps linearly between adjacent stops on both
     // the core and shoulder channels.
-    void sampleColorTimeline(float t, out vec3 core, out vec3 shoulder) {
+    void sampleColorTimeline(float t, out vec3 core, out vec3 shoulder, out float shoulderOpacity, out vec3 edge) {
       int cnt = int(uColorTimelineCount + 0.5);
       if (cnt < 1) {
-        core = vec3(1.0); shoulder = vec3(1.0); return;
+        core = vec3(1.0); shoulder = vec3(1.0); shoulderOpacity = 1.0; edge = uRailEdgeColor; return;
       }
       t = fract(t);
       // Default to first stop, then walk to find the segment containing t.
       core = uColorTimelineCores[0];
       shoulder = uColorTimelineShoulders[0];
+      shoulderOpacity = uColorTimelineShoulderOpacity[0];
+      edge = uColorTimelineEdges[0];
       // Constant-index unroll for WebGL1 compatibility.
       for (int i = 0; i < 15; i++) {
         if (i + 1 >= cnt) break;
@@ -876,8 +953,10 @@ const mat = new THREE.ShaderMaterial({
         float t1 = uColorTimelineTs[i + 1];
         if (t >= t0 && t < t1) {
           float u = (t - t0) / max(t1 - t0, 0.0001);
-          core     = mix(uColorTimelineCores[i],     uColorTimelineCores[i + 1],     u);
-          shoulder = mix(uColorTimelineShoulders[i], uColorTimelineShoulders[i + 1], u);
+          core            = mix(uColorTimelineCores[i],            uColorTimelineCores[i + 1],            u);
+          shoulder        = mix(uColorTimelineShoulders[i],        uColorTimelineShoulders[i + 1],        u);
+          shoulderOpacity = mix(uColorTimelineShoulderOpacity[i],  uColorTimelineShoulderOpacity[i + 1],  u);
+          edge            = mix(uColorTimelineEdges[i],            uColorTimelineEdges[i + 1],            u);
           return;
         }
       }
@@ -885,8 +964,10 @@ const mat = new THREE.ShaderMaterial({
       int last = cnt - 1;
       for (int i = 0; i < 16; i++) {
         if (i == last) {
-          core     = uColorTimelineCores[i];
-          shoulder = uColorTimelineShoulders[i];
+          core            = uColorTimelineCores[i];
+          shoulder        = uColorTimelineShoulders[i];
+          shoulderOpacity = uColorTimelineShoulderOpacity[i];
+          edge            = uColorTimelineEdges[i];
           return;
         }
       }
@@ -911,6 +992,10 @@ const mat = new THREE.ShaderMaterial({
       // — used by the tick painter so uTickColor only shows up where rails
       // were drawn, not across the full background.
       float rawMaxA = 0.0;
+      // Container hull coverage accumulated across every rail this
+      // fragment touches. Composited BEHIND the rails so the hull
+      // shows up as a saturated halo on the outer edges only.
+      float containerMaxA = 0.0;
       for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
         laneCov[i] = 0.0;
         laneCol[i] = vec3(0.0);
@@ -973,6 +1058,29 @@ const mat = new THREE.ShaderMaterial({
             halfW = bodyHalfW * factor;
           }
 
+          // Container hull — mirror this rail's lane positions but
+          // push the centerline OUTWARD from the trunk (y=0) by
+          // uContainerOffset, then accumulate coverage into a separate
+          // bucket so we can composite it BEHIND every rail at the end.
+          // Trunk (rid 0) is not offset, so the hull's trunk lane sits
+          // exactly under the rail trunk (no halo).
+          // sign(0) = 0 in GLSL, which makes the offset smoothly ramp
+          // from 0 at the SPLIT bend to ±uContainerOffset along the
+          // parallel run — same automatic smooth-join the rails get.
+          if (uContainersEnabled > 0.5) {
+            float push = (rid != 0) ? uContainerOffset : 0.0;
+            float cy1  = y1 + sign(y1) * push;
+            float cy2  = y2 + sign(y2) * push;
+            vec2  cE   = ribbonEdges(cy1, cy2, t, max(uContainerHalfW, 0.5));
+            float cyM  = (cE.x + cE.y) * 0.5;
+            float chH  = (cE.y - cE.x) * 0.5;
+            float cdY  = wy - cyM;
+            float cAA  = max(fwidth(wy), 1e-4);
+            // Hard-edged fill — solid hull, no soft halo.
+            float cA   = 1.0 - smoothstep(-cAA, cAA, abs(cdY) - chH);
+            if (cA > containerMaxA) containerMaxA = cA;
+          }
+
           vec2  edges  = ribbonEdges(y1, y2, t, halfW);
           float yMid   = (edges.x + edges.y) * 0.5;
           float hHalf  = (edges.y - edges.x) * 0.5;
@@ -987,12 +1095,6 @@ const mat = new THREE.ShaderMaterial({
           // flush at segment boundaries.
           float d = abs(dY) - hHalfT;
 
-          // Per-rail color, optionally washed toward a shared neutral tint
-          // (uMergeTintColor) as the segment phase climbs into the merge.
-          // Every rail desaturates the same way, so by the time greens and
-          // yellow meet they're all the same pale shade and the colour seam
-          // dissolves — matching the figma ribbon-gradient look where each
-          // rail fades into a near-background tone before converging.
           // Early-out: if this fragment is well outside the rail body
           // there's nothing to paint, so we can skip the (expensive) merge
           // tint + burst computation entirely. 1.5 covers the figma
@@ -1019,6 +1121,8 @@ const mat = new THREE.ShaderMaterial({
           // colour timeline sampled by this fragment's loop position.
           vec3 baseCore = laneColor(rid);
           vec3 baseShl  = laneShoulder(rid);
+          float shoulderOpacity = 1.0;
+          vec3 baseEdge = uRailEdgeColor;
           if (uColorTimelineEnabled > 0.5 && uLoopLen > 0.0) {
             float loopT = fract(wx / uLoopLen);
             // Per-rail offset on the timeline lookup — lets each rail
@@ -1029,10 +1133,11 @@ const mat = new THREE.ShaderMaterial({
               if (k == rid) { railOffset = uColorTimelineRailOffsets[k]; break; }
             }
             loopT = fract(loopT + railOffset + 1.0);   // +1 so negative offsets wrap correctly
-            sampleColorTimeline(loopT, baseCore, baseShl);
+            sampleColorTimeline(loopT, baseCore, baseShl, shoulderOpacity, baseEdge);
           }
           vec3 ridSat  = mix(baseCore, uMergeTintColor, colorMix);
           vec3 ridShl  = mix(baseShl,  uMergeTintColor, colorMix);
+          vec3 ridEdge = mix(baseEdge, uMergeTintColor, colorMix);
 
           // Burst layer — periodic painterly slugs of uBurstColor scrolled
           // along this rail's world-X at its own velocity. Mixed into both
@@ -1053,9 +1158,13 @@ const mat = new THREE.ShaderMaterial({
             // Figma profile — body itself has soft edges. du = 0 at the
             // rail center, du = 1 at the body's outer edge.
             float du   = abs(dY) / max(hHalfT, 1e-4);
-            float pA   = figmaProfileAlpha(du);
+            // Use the shoulder-aware alpha so the shoulder zone can be
+            // semi-transparent (figma gradient stops at 0.5 alpha) —
+            // makes the bg visible through the shoulder band, exactly
+            // like the figma source's pale rail.
+            float pA   = figmaProfileAlphaWithShoulder(du, shoulderOpacity);
             alpha      = pA * clamp(uRailOpacity, 0.0, 1.0);
-            fragCol    = figmaProfileColor(du, ridSat, ridShl, uRailEdgeColor);
+            fragCol    = figmaProfileColor(du, ridSat, ridShl, ridEdge);
           } else {
             // Gaussian profile (default) — crisp body + soft halo outside.
             float fillCov = 1.0 - smoothstep(-aa, aa, d);
@@ -1092,32 +1201,63 @@ const mat = new THREE.ShaderMaterial({
 
       vec3 dst = uBgColor;
       float maxA = 0.0;
-      // Pass 1: composite rails 1..N (non-trunk) first when trunk-on-top
-      // is on, so the trunk paints over the greens. When off, just walk
-      // 0..N in order (original behaviour).
-      int startI = (uTrunkOnTop > 0.5) ? 1 : 0;
-      for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
-        if (i < startI) continue;
-        float a = laneCov[i];
-        if (a < 1e-4) continue;
-        // Both profiles now write the per-fragment color (post merge-taper
-        // colour blend) into laneCol[i] at write time, so composite from
-        // there regardless of profile.
-        vec3 src     = laneCol[i];
-        vec3 blended = blendOp(dst, src, uBlendMode);
-        dst = mix(dst, blended, a);
-        if (a > maxA) maxA = a;
+      // Pass 0: composite the container hull behind everything else, so
+      // both rails (and any merge-tint wash on them) paint on top. The
+      // hull's coverage already wraps to the rails' outer edges via the
+      // uContainerOffset push, so the saturated halo only shows where a
+      // non-trunk rail diverges from the trunk.
+      if (containerMaxA > 1e-4) {
+        dst  = mix(dst, uContainerColor, containerMaxA);
+        if (containerMaxA > maxA) maxA = containerMaxA;
       }
-      // Pass 2: rail 0 last (on top) when trunk-on-top is on. Forces
-      // *normal* blend for the trunk regardless of the global blend mode —
-      // otherwise modes like darken would re-mix it with the greens
-      // underneath and the trunk wouldn't actually paint over.
-      if (uTrunkOnTop > 0.5) {
-        float a0 = laneCov[0];
-        if (a0 >= 1e-4) {
-          vec3 src = laneCol[0];
-          dst = mix(dst, src, a0);
-          if (a0 > maxA) maxA = a0;
+      if (uMergeUnion > 0.5) {
+        // Union compositing — take the MAX alpha across every rail at
+        // this pixel and paint it ONCE with the winning rail's colour.
+        // Removes the internal "seams" that show up where two soft-
+        // edged rails overlap (the second rail's alpha mix darkens
+        // the first rail's already-painted body). Result: the merge
+        // bend reads as a single continuous body smoothly widening
+        // from trunk to N branches, no internal contours.
+        float unionA = 0.0;
+        vec3  unionC = vec3(0.0);
+        for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
+          if (laneCov[i] > unionA) {
+            unionA = laneCov[i];
+            unionC = laneCol[i];
+          }
+        }
+        if (unionA > 1e-4) {
+          dst = mix(dst, unionC, unionA);
+          if (unionA > maxA) maxA = unionA;
+        }
+      } else {
+        // Pass 1: composite rails 1..N (non-trunk) first when trunk-on-top
+        // is on, so the trunk paints over the greens. When off, just walk
+        // 0..N in order (original behaviour).
+        int startI = (uTrunkOnTop > 0.5) ? 1 : 0;
+        for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
+          if (i < startI) continue;
+          float a = laneCov[i];
+          if (a < 1e-4) continue;
+          // Both profiles now write the per-fragment color (post merge-taper
+          // colour blend) into laneCol[i] at write time, so composite from
+          // there regardless of profile.
+          vec3 src     = laneCol[i];
+          vec3 blended = blendOp(dst, src, uBlendMode);
+          dst = mix(dst, blended, a);
+          if (a > maxA) maxA = a;
+        }
+        // Pass 2: rail 0 last (on top) when trunk-on-top is on. Forces
+        // *normal* blend for the trunk regardless of the global blend mode —
+        // otherwise modes like darken would re-mix it with the greens
+        // underneath and the trunk wouldn't actually paint over.
+        if (uTrunkOnTop > 0.5) {
+          float a0 = laneCov[0];
+          if (a0 >= 1e-4) {
+            vec3 src = laneCol[0];
+            dst = mix(dst, src, a0);
+            if (a0 > maxA) maxA = a0;
+          }
         }
       }
       // Paint uTickColor on top of the composited rails, masked by the
@@ -1639,9 +1779,20 @@ function pushColorTimelineToUniforms() {
   const cleaned = raw
     .filter(k => k && typeof k === 'object')
     .map(k => ({
-      t:        Math.max(0, Math.min(1, Number(k.t) || 0)),
-      core:     String(k.core || '#ffffff'),
-      shoulder: String(k.shoulder || k.core || '#ffffff'),
+      t:               Math.max(0, Math.min(1, Number(k.t) || 0)),
+      core:            String(k.core || '#ffffff'),
+      shoulder:        String(k.shoulder || k.core || '#ffffff'),
+      // Default to 1.0 so existing presets without this field behave
+      // identically to before.
+      shoulderOpacity: (k.shoulderOpacity == null || isNaN(Number(k.shoulderOpacity)))
+                         ? 1
+                         : Math.max(0, Math.min(1, Number(k.shoulderOpacity))),
+      // Per-keyframe edge colour — defaults to the global railEdgeColor
+      // (the bg) when missing, so existing presets render identically.
+      // Drives the figma gradient's 0% / 100% stops at alpha 0, so the
+      // colour interpolation between edge and shoulder takes on this
+      // tint at intermediate offsets.
+      edge:            String(k.edge || CONFIG.railEdgeColor || '#F1EFE8'),
     }))
     .sort((a, b) => a.t - b.t)
     .slice(0, 16);
@@ -1649,15 +1800,21 @@ function pushColorTimelineToUniforms() {
   const tsArr   = mat.uniforms.uColorTimelineTs.value;
   const corArr  = mat.uniforms.uColorTimelineCores.value;
   const shlArr  = mat.uniforms.uColorTimelineShoulders.value;
+  const opArr   = mat.uniforms.uColorTimelineShoulderOpacity.value;
+  const edArr   = mat.uniforms.uColorTimelineEdges.value;
   for (let i = 0; i < 16; i++) {
     if (i < cleaned.length) {
       tsArr[i] = cleaned[i].t;
       corArr[i].set(cleaned[i].core);
       shlArr[i].set(cleaned[i].shoulder);
+      opArr[i] = cleaned[i].shoulderOpacity;
+      edArr[i].set(cleaned[i].edge);
     } else {
       tsArr[i] = 1;                  // park beyond range so the search exits
       corArr[i].set('#000000');
       shlArr[i].set('#000000');
+      opArr[i] = 1;
+      edArr[i].set(CONFIG.railEdgeColor || '#F1EFE8');
     }
   }
   mat.uniforms.uColorTimelineCount.value   = cleaned.length;
@@ -1673,6 +1830,16 @@ function pushColorTimelineToUniforms() {
   // Loop length follows the active sim cycle so the timeline wraps in
   // sync with the SPLIT/MERGE cadence.
   mat.uniforms.uLoopLen.value = Math.max(1, (CONFIG.loopSegs | 0) * (CONFIG.segW | 0));
+}
+
+// Push container uniforms — flag, hull colour, outward offset per
+// non-trunk rail, and the hull's stroke half-thickness.
+function pushContainersToUniforms() {
+  mat.uniforms.uContainersEnabled.value = CONFIG.containersEnabled ? 1 : 0;
+  mat.uniforms.uContainerColor.value.set(CONFIG.containerColor || '#ABE0BC');
+  mat.uniforms.uContainerOffset.value   = Number(CONFIG.containerOffset) || 0;
+  mat.uniforms.uContainerHalfW.value    = Math.max(0.5, Number(CONFIG.containerHalfW) || 90);
+  mat.uniforms.uMergeUnion.value        = CONFIG.mergeUnion ? 1 : 0;
 }
 
 function _applyConfigCore(skipMinimap) {
@@ -1754,6 +1921,10 @@ function _applyConfigCore(skipMinimap) {
   // the shader uniform arrays. Loop length comes from sim params so the
   // sampling wraps correctly with the script's cycle.
   pushColorTimelineToUniforms();
+  // Containers — push the up-to-4 balloon zones into the shader.
+  // Uses the same uLoopLen as the colour timeline, so containers and
+  // colour stops both anchor to the same loop fraction.
+  pushContainersToUniforms();
 
   mat.uniforms.uPhaseEnabled.value  = (CONFIG.simMode === 'phasing') ? 1 : 0;
   mat.uniforms.uPhaseSpacing.value  = CONFIG.phasePillSpacing;
@@ -2389,11 +2560,14 @@ function bindGlobalControls() {
     hdr.innerHTML = '<span style="flex:1">t (loop pos)</span>'
                   + '<span style="flex:1">Core</span>'
                   + '<span style="flex:1">Shoulder</span>'
+                  + '<span style="flex:0.7" title="Shoulder opacity — 1 = solid (default), 0.5 = watery">shl α</span>'
                   + '<span style="width:22px"></span>';
     root.appendChild(hdr);
 
     for (let i = 0; i < CONFIG.colorTimeline.length; i++) {
       const kf = CONFIG.colorTimeline[i];
+      // Default shoulderOpacity for older presets.
+      if (kf.shoulderOpacity == null) kf.shoulderOpacity = 1;
       const row = document.createElement('div');
       row.className = 'mod-row';
       const tIn = document.createElement('input');
@@ -2412,6 +2586,15 @@ function bindGlobalControls() {
       sIn.type = 'color'; sIn.value = kf.shoulder || kf.core || '#ffffff';
       sIn.style.flex = '1';
       sIn.addEventListener('input', () => { kf.shoulder = sIn.value; applyConfig(); });
+      const oIn = document.createElement('input');
+      oIn.type = 'number'; oIn.step = '0.05'; oIn.min = '0'; oIn.max = '1';
+      oIn.value = kf.shoulderOpacity;
+      oIn.style.flex = '0.7';
+      oIn.title = 'Shoulder opacity (0 = invisible / fades to edge colour, 1 = solid)';
+      oIn.addEventListener('input', () => {
+        const v = parseFloat(oIn.value);
+        if (!Number.isNaN(v)) { kf.shoulderOpacity = Math.max(0, Math.min(1, v)); applyConfig(); }
+      });
       const rm = document.createElement('button');
       rm.className = 'mod-remove'; rm.textContent = '×'; rm.title = 'Remove keyframe';
       rm.addEventListener('click', () => {
@@ -2419,7 +2602,7 @@ function bindGlobalControls() {
         rebuildColourTimelineEditor();
         applyConfig();
       });
-      row.appendChild(tIn); row.appendChild(cIn); row.appendChild(sIn); row.appendChild(rm);
+      row.appendChild(tIn); row.appendChild(cIn); row.appendChild(sIn); row.appendChild(oIn); row.appendChild(rm);
       root.appendChild(row);
     }
     const addBtn = document.createElement('button');
@@ -2427,11 +2610,12 @@ function bindGlobalControls() {
     addBtn.textContent = '+ Add keyframe';
     addBtn.addEventListener('click', () => {
       const lastT = CONFIG.colorTimeline.reduce((mx, k) => Math.max(mx, k.t || 0), 0);
-      const lastK = CONFIG.colorTimeline[CONFIG.colorTimeline.length - 1] || { core: '#888', shoulder: '#ccc' };
+      const lastK = CONFIG.colorTimeline[CONFIG.colorTimeline.length - 1] || { core: '#888', shoulder: '#ccc', shoulderOpacity: 1 };
       CONFIG.colorTimeline.push({
         t: Math.min(1, lastT + 0.1),
         core: lastK.core || '#888',
         shoulder: lastK.shoulder || '#ccc',
+        shoulderOpacity: (lastK.shoulderOpacity == null) ? 1 : lastK.shoulderOpacity,
       });
       rebuildColourTimelineEditor();
       applyConfig();
