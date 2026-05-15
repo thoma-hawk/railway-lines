@@ -339,7 +339,23 @@ const CONFIG = {
 
   // Simulation
   simMode:      'procedural',  // 'scripted' | 'procedural' | 'phasing' | 'convergence'
+  // String name (registered in SIM.SCRIPTS) OR an inline event array /
+  // object: `[{seg,type,from,to,railId?}, ...]` or `{events:[...]}`. Inline
+  // form lets a preset carry its own self-contained timing without
+  // needing a named script in sim.js.
   simScript:    'v1',
+  // Per-rail merge controls. Maps rail id (as string key) → settings that
+  // override the auto-detected fade behaviour. All fields optional —
+  // anything missing falls back to the auto-detected defaults.
+  //   startFadeSegs:   number of segments the start fade spans
+  //   endFadeSegs:     number of segments the end fade spans
+  //   preBendLead:     segs before the end-bend to start the end-fade
+  //   startMode:       "alpha" | "colour-blend" | "both"   (default: auto)
+  //   endMode:         "alpha" | "colour-blend" | "both"   (default: auto)
+  // Auto = "both" if the rail spawns/terminates at the trunk, else "alpha".
+  // Example:
+  //   "railMerge": { "2": { "startFadeSegs": 5, "endMode": "colour-blend" } }
+  railMerge:    {},
   loopSegs:     30,
   seed:         1,
   mergeChance:  0.20,
@@ -726,6 +742,14 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     // Used to suppress the start alpha fade-in so the rail emerges via
     // colour-blend (pale → saturated) instead of via transparency.
     uRailStartsAtTrunk:        { value: new Float32Array(MAX_LANE_BUCKETS) },
+    // Per-rail mode-enable flags for the four fade effects. 1.0 = the
+    // effect runs; 0.0 = it's skipped. Default is 1.0 for both alpha and
+    // colour fades; railMerge.<rid>.{startMode,endMode} in the preset
+    // can toggle them ("alpha"/"colour-blend"/"both").
+    uRailStartAlphaEnabled:    { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailStartColourEnabled:   { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailEndAlphaEnabled:      { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailEndColourEnabled:     { value: new Float32Array(MAX_LANE_BUCKETS) },
 
     uSegPhases:        { value: segPhaseArray },
     uSegPhasesSoft:    { value: segPhaseSoftArray },
@@ -877,6 +901,10 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uniform float uRailHaloEndFadeEndWX[9];
     uniform float uRailEndsAtTrunk[9];
     uniform float uRailStartsAtTrunk[9];
+    uniform float uRailStartAlphaEnabled[9];
+    uniform float uRailStartColourEnabled[9];
+    uniform float uRailEndAlphaEnabled[9];
+    uniform float uRailEndColourEnabled[9];
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
@@ -1400,18 +1428,18 @@ const mat = window.__mat = new THREE.ShaderMaterial({
           if (uColorMergeTaper > 0.0 && !exemptTrunk && uLoopLen > 0.5) {
             float efStart = uRailHaloEndFadeStartWX[0];
             float efEnd   = uRailHaloEndFadeEndWX[0];
-            float endsTr  = uRailEndsAtTrunk[0];
+            float endColEn  = uRailEndColourEnabled[0];
             float sfStart = uRailHaloStartFadeStartWX[0];
             float sfEnd   = uRailHaloStartFadeEndWX[0];
-            float startsTr = uRailStartsAtTrunk[0];
+            float startColEn = uRailStartColourEnabled[0];
             for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
               if (k == rid) {
                 efStart = uRailHaloEndFadeStartWX[k];
                 efEnd   = uRailHaloEndFadeEndWX[k];
-                endsTr  = uRailEndsAtTrunk[k];
+                endColEn  = uRailEndColourEnabled[k];
                 sfStart = uRailHaloStartFadeStartWX[k];
                 sfEnd   = uRailHaloStartFadeEndWX[k];
-                startsTr = uRailStartsAtTrunk[k];
+                startColEn = uRailStartColourEnabled[k];
                 break;
               }
             }
@@ -1421,7 +1449,7 @@ const mat = window.__mat = new THREE.ShaderMaterial({
             // tint progresses monotonically across the entire window —
             // even past the actual bend segment, where the rail sits on
             // top of the trunk before terminating.
-            if (endsTr > 0.5 && efEnd > efStart + 0.5 &&
+            if (endColEn > 0.5 && efEnd > efStart + 0.5 &&
                 wxModColor >= efStart && wxModColor <= efEnd) {
               float endFadeProgress = smoothstep(efStart, efEnd, wxModColor);
               colorMix = clamp(uColorMergeTaper * endFadeProgress, 0.0, 1.0);
@@ -1429,7 +1457,7 @@ const mat = window.__mat = new THREE.ShaderMaterial({
             // Start side — rail EMERGES from trunk's pale (mirror of end).
             // colorMix starts at 1.0 (full pale) and ramps to 0.0
             // (saturated) across the start-fade window.
-            if (startsTr > 0.5 && sfEnd > sfStart + 0.5 &&
+            if (startColEn > 0.5 && sfEnd > sfStart + 0.5 &&
                 wxModColor >= sfStart && wxModColor <= sfEnd) {
               float startFadeProgress = smoothstep(sfStart, sfEnd, wxModColor);
               colorMix = clamp(uColorMergeTaper * (1.0 - startFadeProgress), 0.0, 1.0);
@@ -1566,27 +1594,31 @@ const mat = window.__mat = new THREE.ShaderMaterial({
               float endAlphaFade   = 1.0;
               if (uLoopLen > 0.5) {
                 float wxMod2 = mod(wx, uLoopLen);
-                if (startFadeEndWX > startFadeStartWX + 0.5) {
-                  // Always apply the alpha fade — it works in
-                  // combination with the colour-merge tint (defined
-                  // below) for trunk-spawning rails. The alpha ramp
-                  // grows the rail's contribution to the compositing
-                  // gradually so subtle rails don't create a visible
-                  // "step" where their full-opacity body suddenly
-                  // adds onto the trunk's existing pale body.
+                // Per-rail alpha-fade enable. When the preset's
+                // railMerge.startMode is "colour-blend" (no alpha), this
+                // flag is 0 and the rail keeps full opacity through the
+                // start window — letting the colour-merge tint do the
+                // emergence alone.
+                float startAlphaEn = 1.0;
+                for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+                  if (k == rid) { startAlphaEn = uRailStartAlphaEnabled[k]; break; }
+                }
+                if (startFadeEndWX > startFadeStartWX + 0.5 && startAlphaEn > 0.5) {
                   if (wxMod2 < startFadeStartWX) {
                     startAlphaFade = 0.0;
                   } else if (wxMod2 <= startFadeEndWX) {
                     startAlphaFade = smoothstep(startFadeStartWX, startFadeEndWX, wxMod2);
                   }
                 }
-                if (endFadeEndWX > endFadeStartWX + 0.5 &&
+                // Per-rail end alpha-fade enable. railMerge.endMode =
+                // "colour-blend" disables this so the rail dissolves
+                // purely via colour-tint to pale.
+                float endAlphaEn = 1.0;
+                for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+                  if (k == rid) { endAlphaEn = uRailEndAlphaEnabled[k]; break; }
+                }
+                if (endFadeEndWX > endFadeStartWX + 0.5 && endAlphaEn > 0.5 &&
                     wxMod2 >= endFadeStartWX && wxMod2 <= endFadeEndWX) {
-                  // Always apply the alpha fade — combined with the
-                  // colour-merge tint below for trunk-merging rails,
-                  // it gives a true seamless dissolve (the rail's
-                  // contribution shrinks gradually rather than adding
-                  // full-opacity pale body on top of trunk).
                   endAlphaFade = 1.0 - smoothstep(endFadeStartWX, endFadeEndWX, wxMod2);
                 }
               }
@@ -2421,13 +2453,23 @@ function pushPhaseRangeY() {
   const endFadeEnArr   = mat.uniforms.uRailHaloEndFadeEndWX.value;
   const endsAtTrunkArr   = mat.uniforms.uRailEndsAtTrunk.value;
   const startsAtTrunkArr = mat.uniforms.uRailStartsAtTrunk.value;
+  const startAlphaEnArr  = mat.uniforms.uRailStartAlphaEnabled.value;
+  const startColEnArr    = mat.uniforms.uRailStartColourEnabled.value;
+  const endAlphaEnArr    = mat.uniforms.uRailEndAlphaEnabled.value;
+  const endColEnArr      = mat.uniforms.uRailEndColourEnabled.value;
   for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
     startFadeStArr[i] = 0; startFadeEnArr[i] = 0;
     startArr[i] = 0; taperArr[i] = 0; endArr[i] = 0;
     endFadeStArr[i] = 0; endFadeEnArr[i] = 0;
     endsAtTrunkArr[i] = 0;
     startsAtTrunkArr[i] = 0;
+    // Default both effects ON; mode overrides below set 0 to disable.
+    startAlphaEnArr[i] = 1;
+    startColEnArr[i]   = 1;
+    endAlphaEnArr[i]   = 1;
+    endColEnArr[i]     = 1;
   }
+  const railMergeCfg = (CONFIG.railMerge && typeof CONFIG.railMerge === 'object') ? CONFIG.railMerge : {};
   if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
     const loopLen = SIM.LOOP_SEGS || CONFIG.loopSegs || 1;
     const segW    = CONFIG.segW || 1;
@@ -2438,6 +2480,9 @@ function pushPhaseRangeY() {
     for (let rid = 0; rid < MAX_LANE_BUCKETS; rid++) {
       const amt = Number(haloAmounts[rid]) || 0;
       if (!(amt > 0.0001)) continue;
+      // Per-rail overrides from the preset's railMerge block (if any).
+      // Look up by string key (JSON object keys are strings).
+      const rm = railMergeCfg[String(rid)] || railMergeCfg[rid] || {};
       let firstActiveSeg = -1;
       let parkStartSeg = -1, parkEndSeg = -1, bendEndSeg = -1, lastActiveSeg = -1;
       let endBendStartSeg = -1; // last segment where the rail bent (= when the END bend starts)
@@ -2496,6 +2541,12 @@ function pushPhaseRangeY() {
           fadeStartSeg = firstActiveSeg;
           fadeEndSeg   = bendEndSeg;             // = end of bend
         }
+        // Preset override: railMerge.<rid>.startFadeSegs = N → window
+        // spans [firstActiveSeg, firstActiveSeg + N].
+        if (Number.isFinite(rm.startFadeSegs) && rm.startFadeSegs > 0) {
+          fadeStartSeg = firstActiveSeg;
+          fadeEndSeg   = firstActiveSeg + rm.startFadeSegs;
+        }
         startFadeStArr[rid] = fadeStartSeg * segW;
         startFadeEnArr[rid] = fadeEndSeg   * segW;
         // Detect SPLIT-from-trunk style start: if the rail's first
@@ -2517,23 +2568,33 @@ function pushPhaseRangeY() {
       // use a shorter fade.
       if (lastActiveSeg >= 0 && lastActiveSeg < loopLen - 1) {
         const railEndSeg = lastActiveSeg + 1;
-        const segsForEnd = subtle ? subtleEndFadeSegs : endFadeSegs;
-        // For subtle rails that have an END bend (merge-back to trunk),
-        // anchor the end-fade to start ~2 segments BEFORE the bend
-        // begins — so the colour blend has already started progressing
-        // when the rail visibly starts bending toward the trunk
-        // (rather than the blend kicking off at the same instant as
-        // the bend, where it's barely visible until partway through).
+        // Preset overrides win; otherwise use the auto-detected defaults.
+        const segsForEnd = Number.isFinite(rm.endFadeSegs) && rm.endFadeSegs > 0
+                            ? rm.endFadeSegs
+                            : (subtle ? subtleEndFadeSegs : endFadeSegs);
+        const preBendLead = Number.isFinite(rm.preBendLead) && rm.preBendLead >= 0
+                            ? rm.preBendLead
+                            : 2;
+        // Anchor: for subtle rails with an END bend, start `preBendLead`
+        // segs before the bend; otherwise count back from rail's end.
         let fadeStartSeg;
-        const preBendLead = 2;
         if (subtle && endBendStartSeg >= 0 && endBendStartSeg > (bendEndSeg >= 0 ? bendEndSeg : 0)) {
           fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, endBendStartSeg - preBendLead);
         } else {
           fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, railEndSeg - segsForEnd);
         }
-        if (railEndSeg > fadeStartSeg) {
+        // Window LENGTH = endFadeSegs (if explicit) or pinned to railEnd.
+        // Letting the preset cap the window means `endFadeSegs: 10` truly
+        // gives a 10-seg dissolve regardless of how late the rail lives.
+        let fadeEndSeg;
+        if (Number.isFinite(rm.endFadeSegs) && rm.endFadeSegs > 0) {
+          fadeEndSeg = Math.min(railEndSeg, fadeStartSeg + rm.endFadeSegs);
+        } else {
+          fadeEndSeg = railEndSeg;
+        }
+        if (fadeEndSeg > fadeStartSeg) {
           endFadeStArr[rid] = fadeStartSeg * segW;
-          endFadeEnArr[rid] = railEndSeg   * segW;
+          endFadeEnArr[rid] = fadeEndSeg   * segW;
         }
         // Detect MERGE-into-trunk style ending: if the rail's last
         // segment ends with y2 close to trunkY, it's merging into the
@@ -2547,6 +2608,24 @@ function pushPhaseRangeY() {
           }
         }
       }
+      // Resolve start/end MODE → enable flags for alpha + colour effects.
+      // Preset override wins. Without one, auto-detect from geometry:
+      //   spawns/terminates at trunk → "both" (colour blend ON)
+      //   spawns/terminates elsewhere → "alpha" only (colour blend OFF)
+      const resolveMode = (modeStr, atTrunk) => {
+        const explicit = (typeof modeStr === 'string') ? modeStr.toLowerCase() : null;
+        const mode = explicit || (atTrunk ? 'both' : 'alpha');
+        return {
+          alpha:  (mode === 'alpha' || mode === 'both') ? 1 : 0,
+          colour: (mode === 'colour-blend' || mode === 'both') ? 1 : 0,
+        };
+      };
+      const startM = resolveMode(rm.startMode, startsAtTrunkArr[rid] > 0.5);
+      const endM   = resolveMode(rm.endMode,   endsAtTrunkArr[rid]   > 0.5);
+      startAlphaEnArr[rid] = startM.alpha;
+      startColEnArr[rid]   = startM.colour;
+      endAlphaEnArr[rid]   = endM.alpha;
+      endColEnArr[rid]     = endM.colour;
     }
   }
 }

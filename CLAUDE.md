@@ -49,15 +49,32 @@ Inside `app-three.js`:
 Visual changes follow a tight iteration loop:
 
 1. Edit `app-three.js` (often the shader inside `mat = new THREE.ShaderMaterial`) and/or a preset JSON.
-2. Bump the `?v=` query in `index.html` for the file you edited.
-3. Reload the preview.
-4. Drop a preset JSON onto the page to test it, or use `window.__mat.uniforms` in DevTools to inspect what got pushed.
+2. Reload the preview. `index.html` auto-cache-busts `sim.js` and `app-three.js` via `Date.now()`, so a fresh edit is always served (no manual `?v=` bumps needed).
+3. Drop a preset JSON onto the page to test it.
 
-Useful for verification:
-- `gl.readPixels` on the canvas to sample actual rendered RGB at any point — the only reliable way to confirm what the shader is producing (matches against figma references in `svg/`).
-- `__mat` is exposed on `window` for inspection. Most things you'd want to check (current uniforms, current shader source) are on `window.__mat`.
+Useful for verification, all exposed on `window`:
+- `__mat` — the ShaderMaterial. Inspect `.uniforms.uFoo.value` to see what got pushed.
+- `__sample(tx, ty)` — read one pixel (normalised coords). Returns `{ x, y, r, g, b, wx, wxMod, seg }`.
+- `__sampleColumn(tx)` — read a full vertical strip. Returns `{ wx, wxMod, seg, height, pixels: Uint8Array(rgb*H) }` (top-to-bottom).
 
-When a preset references a SIM script (`simMode: "scripted"`, `simScript: "high_cpu_v2"` etc.), the script name must exist in `sim.js`'s `SCRIPTS` map.
+URL params hydrate state on load: `?preset=<path>&camX=<n>&zoom=<n>&speed=<n>`. Use this for deterministic camera positioning during verification — no need to pulse `speed` toward a target.
+
+### Preset schema for rail merges (Phase 1 work)
+
+`CONFIG.simScript` accepts either a string (looked up in `SIM.SCRIPTS`) or an inline form: `{ events: [...] }` (or a bare event array). Inline lets a preset carry its own rail-life timing without touching `sim.js`.
+
+`CONFIG.railMerge` (object keyed by rail id as string) overrides the auto-detected per-rail merge behaviour. All fields optional:
+- `startFadeSegs` / `endFadeSegs` — fade window length in segments
+- `preBendLead` — segs before the end-bend to start the end-fade (only used when the rail has an end-bend toward trunk)
+- `startMode` / `endMode` — `"alpha"` | `"colour-blend"` | `"both"`. Auto = `"both"` if the rail spawns/terminates at trunk, else `"alpha"`.
+
+Example:
+```json
+"railMerge": {
+  "2": { "startFadeSegs": 6, "endFadeSegs": 10, "preBendLead": 4, "endMode": "both" }
+}
+```
+With this and an inline `simScript`, a preset fully defines a rail's life — no source edits to art-direct.
 
 ## Things that have specifically tripped up past edits
 

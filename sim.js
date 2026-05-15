@@ -738,7 +738,20 @@ const SIM = (() => {
   }
 
   // ── Setters ──────────────────────────────────────────────────────────────
-  function setScript(n)        { if (SCRIPTS[n]) { ACTIVE = SCRIPTS[n]; stateReset(); } }
+  // Accepts either:
+  //   - a string name → look up in SCRIPTS map
+  //   - an array of event objects → use directly
+  //   - an object with .events → use the events array
+  // The inline forms let presets carry their own self-contained timing
+  // without needing a registered named script in SCRIPTS.
+  function setScript(n) {
+    if (typeof n === 'string') {
+      if (SCRIPTS[n]) { ACTIVE = SCRIPTS[n]; stateReset(); }
+      return;
+    }
+    if (Array.isArray(n)) { ACTIVE = n.slice(); stateReset(); return; }
+    if (n && Array.isArray(n.events)) { ACTIVE = n.events.slice(); stateReset(); return; }
+  }
   function setConvergencePattern(n) {
     if (CONV_PATTERNS[n] && CONV_SCRIPT !== CONV_PATTERNS[n]) {
       CONV_SCRIPT = CONV_PATTERNS[n];
