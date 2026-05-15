@@ -208,6 +208,14 @@
         </div>
       </section>
 
+      <!-- Phase 3: per-rail inspector. Populated by renderRailInspector()
+           in app-three.js. Hidden until a rail is selected by clicking in
+           the minimap. -->
+      <section id="rail-inspector" style="display:none;
+               margin-top:8px; padding:8px; border-radius:4px;
+               background:rgba(0,0,0,0.25);
+               border:1px solid rgba(255,255,255,0.08);"></section>
+
       <section id="pinned-sim">
         <label>Speed <input type="range" min="0" max="30000" step="1" data-k="speed"><span data-v="speed"></span></label>
         <label>Zoom <input type="range" min="0.05" max="2" step="0.01" data-k="viewZoom"><span data-v="viewZoom"></span></label>

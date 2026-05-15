@@ -2823,6 +2823,133 @@ const MM_WINDOW_BEHIND = 6;
 const MM_WINDOW_AHEAD  = 24;
 let minimapPlayhead = null;
 let minimapInfo = null;       // { segStart, segCount, segPerUnit, isProcedural }
+// ── Phase 3: per-rail inspector ──────────────────────────────────────────
+// Set via selectRail(rid) when a connection in the minimap is clicked.
+// renderRailInspector() reads this + the current per-rail uniforms and
+// builds a form into #rail-inspector with sliders/dropdowns that write to
+// CONFIG.railMerge[rid] (overrides) or CONFIG.laneHaloAmount/Sigma[rid].
+let selectedRailId = null;
+
+function selectRail(rid) {
+  if (typeof rid !== 'number') return;
+  selectedRailId = rid;
+  renderRailInspector();
+  buildMinimap();  // re-render so the selected connection highlights
+}
+function closeInspector() {
+  selectedRailId = null;
+  const el = document.getElementById('rail-inspector');
+  if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  buildMinimap();
+}
+
+function railMergeFor(rid) {
+  if (!CONFIG.railMerge || typeof CONFIG.railMerge !== 'object') CONFIG.railMerge = {};
+  if (!CONFIG.railMerge[String(rid)]) CONFIG.railMerge[String(rid)] = {};
+  return CONFIG.railMerge[String(rid)];
+}
+
+function renderRailInspector() {
+  const el = document.getElementById('rail-inspector');
+  if (!el) return;
+  const rid = selectedRailId;
+  if (rid == null) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'block';
+
+  const rm = railMergeFor(rid);
+  const swatch = (CONFIG.laneColors && CONFIG.laneColors[rid]) || '#888';
+  const amt    = (CONFIG.laneHaloAmount && CONFIG.laneHaloAmount[rid] != null) ? CONFIG.laneHaloAmount[rid] : 0;
+  const sig    = (CONFIG.laneHaloSigma  && CONFIG.laneHaloSigma[rid]  != null) ? CONFIG.laneHaloSigma[rid]  : 1.5;
+
+  // Effective auto-detected values (from the uniforms pushPhaseRangeY just
+  // wrote) so the placeholder shows what "auto" resolves to right now.
+  const m = window.__mat;
+  const segW = CONFIG.segW || 1;
+  const startW = m ? [m.uniforms.uRailHaloStartFadeStartWX.value[rid]/segW, m.uniforms.uRailHaloStartFadeEndWX.value[rid]/segW] : [0,0];
+  const endW   = m ? [m.uniforms.uRailHaloEndFadeStartWX.value[rid]/segW,   m.uniforms.uRailHaloEndFadeEndWX.value[rid]/segW]   : [0,0];
+  const autoStartFadeSegs = Math.round(startW[1] - startW[0]);
+  const autoEndFadeSegs   = Math.round(endW[1]   - endW[0]);
+
+  const modeOpts = ['auto', 'alpha', 'colour-blend', 'both'];
+
+  el.innerHTML = `
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+      <div style="width:14px; height:14px; border-radius:3px; background:${swatch};
+                  border:1px solid rgba(255,255,255,0.15);"></div>
+      <div class="sub-head" style="margin:0; flex:1;">Rail ${rid}</div>
+      <button class="preset-btn" id="rail-inspector-close" style="width:auto; margin:0; padding:2px 8px;">×</button>
+    </div>
+    <div class="sub-head">Halo</div>
+    <label>Amount <input type="range" min="0" max="1" step="0.01" data-rik="amount" value="${amt}"><span data-riv="amount">${amt.toFixed(2)}</span></label>
+    <label>Sigma <input type="range" min="0.05" max="6" step="0.05" data-rik="sigma" value="${sig}"><span data-riv="sigma">${sig.toFixed(2)}</span></label>
+
+    <div class="sub-head sub-block">Start fade</div>
+    <label>Length (auto ${autoStartFadeSegs})
+      <input type="range" min="0" max="20" step="1" data-rik="startFadeSegs"
+             value="${rm.startFadeSegs ?? 0}">
+      <span data-riv="startFadeSegs">${rm.startFadeSegs != null ? rm.startFadeSegs : 'auto'}</span>
+    </label>
+    <label>Mode
+      <select data-rik="startMode">
+        ${modeOpts.map(o => `<option value="${o}"${(rm.startMode || 'auto') === o ? ' selected' : ''}>${o}</option>`).join('')}
+      </select>
+    </label>
+
+    <div class="sub-head sub-block">End fade</div>
+    <label>Length (auto ${autoEndFadeSegs})
+      <input type="range" min="0" max="20" step="1" data-rik="endFadeSegs"
+             value="${rm.endFadeSegs ?? 0}">
+      <span data-riv="endFadeSegs">${rm.endFadeSegs != null ? rm.endFadeSegs : 'auto'}</span>
+    </label>
+    <label>Pre-bend lead
+      <input type="range" min="0" max="10" step="1" data-rik="preBendLead"
+             value="${rm.preBendLead ?? 2}">
+      <span data-riv="preBendLead">${rm.preBendLead != null ? rm.preBendLead : 2}</span>
+    </label>
+    <label>Mode
+      <select data-rik="endMode">
+        ${modeOpts.map(o => `<option value="${o}"${(rm.endMode || 'auto') === o ? ' selected' : ''}>${o}</option>`).join('')}
+      </select>
+    </label>
+  `;
+
+  el.querySelector('#rail-inspector-close').addEventListener('click', closeInspector);
+
+  // Wire up live updates. 0 on the length sliders = "auto" (delete the
+  // override). Modes have an explicit "auto" option that deletes too.
+  const applyRailMerge = () => {
+    if (typeof applyConfig === 'function') applyConfig();
+  };
+  el.querySelectorAll('[data-rik]').forEach(inp => {
+    const key = inp.dataset.rik;
+    inp.addEventListener('input', () => {
+      const v = inp.value;
+      const valSpan = el.querySelector(`[data-riv="${key}"]`);
+      if (key === 'amount' || key === 'sigma') {
+        const arr = key === 'amount' ? CONFIG.laneHaloAmount : CONFIG.laneHaloSigma;
+        if (Array.isArray(arr)) arr[rid] = parseFloat(v);
+        if (valSpan) valSpan.textContent = parseFloat(v).toFixed(2);
+      } else if (key === 'startFadeSegs' || key === 'endFadeSegs' || key === 'preBendLead') {
+        const n = parseInt(v, 10);
+        const rm2 = railMergeFor(rid);
+        if (key === 'preBendLead') {
+          rm2[key] = n;  // 0 is a valid value (no lead), keep it
+          if (valSpan) valSpan.textContent = String(n);
+        } else if (n === 0) {
+          delete rm2[key];
+          if (valSpan) valSpan.textContent = 'auto';
+        } else {
+          rm2[key] = n;
+          if (valSpan) valSpan.textContent = String(n);
+        }
+      } else if (key === 'startMode' || key === 'endMode') {
+        const rm2 = railMergeFor(rid);
+        if (v === 'auto') delete rm2[key]; else rm2[key] = v;
+      }
+      applyRailMerge();
+    });
+  });
+}
 
 function mmSegX(segOffset, segCount) {
   const span = MM.W - 2 * MM.PAD_X;
@@ -2870,7 +2997,11 @@ function buildMinimap() {
     svg.appendChild(line);
   }
 
-  // Connections.
+  // Connections. Each path is tagged with its rail id so the Phase 3
+  // inspector can pick up the right rail when one is clicked. We thicken
+  // the stroke for the currently-selected rail and use the rail's own
+  // colour so the topology preview reads as a coloured map of the rails.
+  const selRid = (typeof selectedRailId === 'number') ? selectedRailId : -1;
   for (let i = 0; i < segCount; i++) {
     const seg = segStart + i;
     const conns = SIM.connectionsAt(seg);
@@ -2881,10 +3012,23 @@ function buildMinimap() {
       const yB = mmLaneY(c.y2, laneCount);
       const path = document.createElementNS(SVG_NS, 'path');
       path.setAttribute('d', mmCubicPath(x1, yA, x2, yB));
-      path.setAttribute('stroke', 'rgba(200,210,220,0.7)');
-      path.setAttribute('stroke-width', '1.5');
+      const isSel = (c.id === selRid);
+      const stroke = (c.id != null && CONFIG.laneColors && CONFIG.laneColors[c.id])
+                     ? CONFIG.laneColors[c.id]
+                     : 'rgba(200,210,220,0.7)';
+      path.setAttribute('stroke', stroke);
+      path.setAttribute('stroke-width', isSel ? '3.5' : '1.5');
+      path.setAttribute('stroke-opacity', isSel ? '1.0' : '0.7');
       path.setAttribute('fill', 'none');
       path.setAttribute('stroke-linecap', 'round');
+      path.style.cursor = 'pointer';
+      if (typeof c.id === 'number') path.dataset.rid = String(c.id);
+      // Click selects the rail (only outside drag-to-draw mode).
+      path.addEventListener('click', (ev) => {
+        if (drawingActive()) return;
+        ev.stopPropagation();
+        selectRail(c.id);
+      });
       svg.appendChild(path);
     }
   }
