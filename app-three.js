@@ -2947,6 +2947,138 @@ function buildMinimap() {
     }
   }
 
+  // ── Draggable script-event handles (Phase 2 timeline editor) ────────────
+  // In scripted mode, render one marker per SPLIT/MERGE/END event from the
+  // active script at its (seg, from) position. Dragging horizontally
+  // changes the event's `seg`; vertically changes its `from` lane (with
+  // its `to` shifted by the same delta so the bend shape is preserved).
+  // Modifies a fresh copy of the script and pushes it back through
+  // SIM.setScript so SCRIPTS[name] is never mutated in place.
+  const scriptEditableModes = new Set(['scripted']);
+  if (scriptEditableModes.has(CONFIG.simMode) && SIM.getActiveScript) {
+    const events = SIM.getActiveScript();
+    // INIT events have no seg axis to drag; skip them. Render the rest.
+    const editable = events
+      .map((ev, idx) => ({ ev, idx }))
+      .filter(({ ev }) => {
+        const t = String(ev.type).toUpperCase();
+        return t === 'SPLIT' || t === 'MERGE' || t === 'END';
+      });
+    const colorFor = (type) =>
+      type === 'SPLIT' ? 'rgba(120, 220, 255, 1)'
+      : type === 'MERGE' ? 'rgba(255, 200, 80, 1)'
+      :                    'rgba(255, 120, 120, 1)'; // END
+    const handleByIdx = new Map();
+    for (const { ev, idx } of editable) {
+      const type = String(ev.type).toUpperCase();
+      const segOffset = ev.seg - segStart;
+      if (segOffset < 0 || segOffset > segCount) continue;
+      const cx = mmSegX(segOffset, segCount);
+      const cy = mmLaneY(parseFloat(ev.from), laneCount);
+      const handle = document.createElementNS(SVG_NS, 'circle');
+      handle.setAttribute('cx', cx);
+      handle.setAttribute('cy', cy);
+      handle.setAttribute('r', 5);
+      handle.setAttribute('fill', colorFor(type));
+      handle.setAttribute('stroke', '#fff');
+      handle.setAttribute('stroke-width', '1');
+      handle.style.cursor = 'grab';
+      handle.dataset.evIdx = String(idx);
+      svg.appendChild(handle);
+      handleByIdx.set(idx, handle);
+    }
+
+    // Drag state per handle. mousedown on a handle starts drag, suppressed
+    // the SVG-level drag-to-draw via stopPropagation. We listen on window
+    // for move/up so the drag survives mouse leaving the SVG.
+    let dragging = null;
+    const pxToSegLaneFloat = (clientX, clientY) => {
+      const rect = svg.getBoundingClientRect();
+      const xRel = (clientX - rect.left) / rect.width * MM.W;
+      const yRel = (clientY - rect.top)  / rect.height * MM.H;
+      const segOffset = ((xRel - MM.PAD_X) / (MM.W - 2 * MM.PAD_X)) * segCount;
+      const seg = segStart + segOffset;
+      const span = Math.max(1, laneCount - 1);
+      const laneOffset = ((MM.H - MM.PAD_Y - yRel) / (MM.H - 2 * MM.PAD_Y)) * span;
+      return { seg, lane: laneOffset };
+    };
+    const commitDrag = () => {
+      if (!dragging) return;
+      const { idx, snapshot } = dragging;
+      // Apply edits via setScript so ACTIVE updates and the sim's
+      // per-segment connection cache rebuilds. Also store back into
+      // CONFIG.simScript so the change persists if the preset is saved.
+      const next = events.slice();
+      next[idx] = snapshot.modified;
+      // Auto-extend loopSegs if a drag pushed an event past the loop's
+      // end. Pad by 2 so the rail-terminates heuristic in pushPhaseRangeY
+      // (lastActiveSeg < loopLen - 1) still fires for events at the max
+      // seg — otherwise the fade window would be zeroed out.
+      const maxSeg = next.reduce((m, ev) => Math.max(m, ev.seg || 0), 0);
+      if (maxSeg + 2 > CONFIG.loopSegs) {
+        CONFIG.loopSegs = maxSeg + 2;
+      }
+      SIM.setScript(next);
+      CONFIG.simScript = { events: next };
+      dragging = null;
+      // Re-run downstream so per-rail fade windows match the new timing.
+      if (typeof applyConfig === 'function') applyConfig();
+      buildMinimap();
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',   onUp);
+    };
+    const onMove = (ev) => {
+      if (!dragging) return;
+      // Delta drag — the handle moves by the same (Δseg, Δlane) as the
+      // cursor, regardless of where the cursor started inside the handle.
+      const cur = pxToSegLaneFloat(ev.clientX, ev.clientY);
+      const cursor0 = dragging.snapshot.cursorStart;
+      const dSeg  = cur.seg  - cursor0.seg;
+      const dLane = cur.lane - cursor0.lane;
+      const original = dragging.snapshot.original;
+      const segSnapped = Math.max(0, Math.round(original.seg + dSeg));
+      // Preserve `from` exactly when there's no meaningful vertical drag —
+      // otherwise an integer-snap mangles fractional lanes like 3.01 (used
+      // for "park just above trunk" tricks) down to 3, breaking the rail
+      // match for END events that look up by exact lane.
+      const fromBase   = parseFloat(original.from);
+      let   newFrom    = fromBase;
+      let   fromDelta  = 0;
+      if (Math.abs(dLane) >= 0.5) {
+        newFrom   = Math.max(0, Math.min(laneCount - 1, Math.round(fromBase + dLane)));
+        fromDelta = newFrom - fromBase;
+      }
+      const modified = { ...original, seg: segSnapped, from: newFrom };
+      // Shift `to` by the same lane delta so the bend keeps its shape.
+      if (original.to != null && Number.isFinite(parseFloat(original.to))) {
+        modified.to = parseFloat(original.to) + fromDelta;
+      }
+      dragging.snapshot.modified = modified;
+      // Live visual feedback: move the handle. Refrains from rebuilding
+      // the whole minimap on every mousemove for performance.
+      const handle = handleByIdx.get(dragging.idx);
+      if (handle) {
+        const cx = mmSegX(segSnapped - segStart, segCount);
+        const cy = mmLaneY(laneSnapped, laneCount);
+        handle.setAttribute('cx', cx);
+        handle.setAttribute('cy', cy);
+      }
+    };
+    const onUp = (ev) => { commitDrag(); };
+    for (const [idx, handle] of handleByIdx) {
+      handle.addEventListener('mousedown', (ev) => {
+        ev.stopPropagation(); // don't trigger drag-to-draw
+        ev.preventDefault();
+        handle.style.cursor = 'grabbing';
+        const original = { ...events[idx] };
+        const cursorStart = pxToSegLaneFloat(ev.clientX, ev.clientY);
+        dragging = { idx, snapshot: { original, modified: original, cursorStart } };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup',   onUp);
+      });
+    }
+  }
+
   // Drag-to-draw — active in scripted (with Draw toggle on) and draw
   // modes. Maps client (x,y) to integer (seg, lane); commits MERGE on
   // plain drag, SPLIT on shift-drag. End-segment is forced to start_seg+1

@@ -752,6 +752,9 @@ const SIM = (() => {
     if (Array.isArray(n)) { ACTIVE = n.slice(); stateReset(); return; }
     if (n && Array.isArray(n.events)) { ACTIVE = n.events.slice(); stateReset(); return; }
   }
+  // Return a fresh copy of the currently active script events so UI can
+  // edit + re-submit via setScript without ever mutating SCRIPTS[name].
+  function getActiveScript() { return ACTIVE.map(ev => ({ ...ev })); }
   function setConvergencePattern(n) {
     if (CONV_PATTERNS[n] && CONV_SCRIPT !== CONV_PATTERNS[n]) {
       CONV_SCRIPT = CONV_PATTERNS[n];
@@ -827,7 +830,7 @@ const SIM = (() => {
     laneToY,
     activeLanesAt, connectionsAt, stationWeight, ownerLane,
     smoothstep,
-    setScript, setLoopSegs, setSegW, setCenterY, setLaneSpace, setLaneCount,
+    setScript, getActiveScript, setLoopSegs, setSegW, setCenterY, setLaneSpace, setLaneCount,
     setMode, setSeed, setMergeChance, setSplitChance, setSpawnChance, setEndChance, setMaxTracks, reroll,
     setConvergencePattern,
     CONV_PATTERN_KEYS: Object.keys(CONV_PATTERNS),
