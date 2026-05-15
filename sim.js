@@ -97,6 +97,44 @@ const SIM = (() => {
       { seg: 16, type: 'END',   from: 5, railId: 1 },                                   // red dead-ends
       { seg: 22, type: 'MERGE', from: 5, to: 3, railId: 2 },                            // blue MERGE back — mirror of seg 8's SPLIT bend
     ],
+    // High-security / encrypted connection story — pale trunk splits
+    // into two pale rails with a NARROW spread, wrapped by a thin
+    // green container. The container "grows onto" the rails as they
+    // diverge (sign(y)*offset → 0 at trunk lane, full at branch
+    // lanes), and retracts as they converge back. Fused SPLIT+MERGE
+    // moves the trunk into one branch lane so the parallel section
+    // has just 2 rails (no centre trunk visible).
+    //   seg 0  INIT  trunk at lane 3
+    //   seg 4  SPLIT 3→4 fused with MERGE 3→2 → rid 0 at 2, rid 1 at 4
+    //   seg 20 MERGE 4→3 + MERGE 2→3 → rails converge back, one absorbed
+    high_security: [
+      { seg: 0,  type: 'INIT',  from: 3 },
+      { seg: 4,  type: 'SPLIT', from: 3, to: 4 },
+      { seg: 4,  type: 'MERGE', from: 3, to: 2 },
+      { seg: 20, type: 'MERGE', from: 4, to: 3 },
+      { seg: 20, type: 'MERGE', from: 2, to: 3 },
+    ],
+    // high_cpu_v2 — same story as high_cpu but with a PARKING phase
+    // for each branch before it bends out. Each branch first spawns
+    // at a slightly-off-trunk lane (3.1, just above) so the rail's
+    // body extends a hair past the trunk's top edge — visible as a
+    // soft / blurry halo on top of the pale rail. Then a MERGE bends
+    // it up to lane 5 where it becomes fully defined (alpha ramps
+    // from ~0.4 to 1.0 via perRailPhase). Red parks for ~4 segs (~1.6s
+    // at speed 8850 / segW 3500), bends in 1 seg, runs parallel for
+    // ~6 segs (~2.4s), then blue mirrors the same pattern. Red dead-
+    // ends; blue merges back. Reverse paint order so red (rid 1)
+    // paints in front of blue (rid 2) once both are at lane 5.
+    high_cpu_v2: [
+      { seg: 0,  type: 'INIT',  from: 3 },
+      { seg: 3,  type: 'SPLIT', from: 3, to: 3.1 },                         // red parks (rid 1) just above trunk
+      { seg: 7,  type: 'MERGE', from: 3.1, to: 5, railId: 1 },              // red bends UP to lane 5
+      { seg: 13, type: 'SPLIT', from: 3, to: 3.1 },                         // blue parks (rid 2) just above trunk
+      { seg: 17, type: 'MERGE', from: 3.1, to: 5, railId: 2, allowOverlap: true }, // blue bends UP behind red
+      { seg: 25, type: 'END',   from: 5, railId: 1 },                        // red dead-ends
+      { seg: 28, type: 'MERGE', from: 5, to: 3.01, railId: 2 },               // blue bends back ALMOST to trunk (0.01 lane offset avoids absorption)
+      { seg: 33, type: 'END',   from: 3.01, railId: 2 },                      // blue ends a few segs later — gives the end-fade time to dissolve blue on top of the pale
+    ],
   };
 
   let ACTIVE = SCRIPTS.v1;

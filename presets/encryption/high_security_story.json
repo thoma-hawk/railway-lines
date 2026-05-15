@@ -1,0 +1,121 @@
+{
+  "speed": 4525,
+  "viewZoom": 0.6,
+  "segW": 1500,
+  "laneSpace": 75,
+  "railWidth": 90,
+  "railSoft": 0,
+  "railSigma": 0.61,
+  "railOpacity": 0.96,
+  "bgColor": "#F1EFE8",
+  "railProfile": "figma",
+
+  "laneColors": [
+    "#D9DECA", "#D9DECA", "#D9DECA", "#D9DECA", "#D9DECA",
+    "#D9DECA", "#D9DECA", "#D9DECA", "#D9DECA"
+  ],
+  "laneShoulderColors": [
+    "#E9F3CD", "#E9F3CD", "#E9F3CD", "#E9F3CD", "#E9F3CD",
+    "#E9F3CD", "#E9F3CD", "#E9F3CD", "#E9F3CD"
+  ],
+  "laneShoulderOpacities": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+  "laneEdgeColors": [
+    "#E7E5DD", "#E7E5DD", "#E7E5DD", "#E7E5DD", "#E7E5DD",
+    "#E7E5DD", "#E7E5DD", "#E7E5DD", "#E7E5DD"
+  ],
+
+  "railEdgeColor": "#F1EFE8",
+  "profileCore": 0.22,
+  "profileShoulder": 0.80,
+
+  "blendMode": "normal",
+  "paletteHueOffset": 0,
+  "paletteSat": 0.62,
+  "paletteLight": 0.5,
+
+  "tickAmount": 0,
+  "tickSpacing": 75,
+  "tickWidth": 2,
+  "tickColor": "#F1EFE8",
+  "tickMotionBlur": 0,
+
+  "inkTrapAmount": 0,
+  "inkTrapSpacing": 1050,
+  "inkTrapDensity": 0.45,
+  "inkTrapWidth": 368,
+  "inkTrapDirection": 0.28,
+
+  "burstAmount": 0,
+  "burstDensity": 0.5,
+  "burstCell": 600,
+  "burstLenMin": 0.25,
+  "burstLenMax": 0.85,
+  "burstSpeed": 800,
+  "burstRailSpread": 0.6,
+  "burstColor": "#DE4D0E",
+  "burstLockToRail": false,
+
+  "phasePillSpacing": 137,
+  "phasePillLength": 19,
+  "phasePillHeight": 68,
+  "phasePillOpacityA": 1,
+  "phaseColorA": "#a2a792",
+
+  "convergencePattern": "adjacent",
+  "convergenceTaper": 0,
+  "colorMergeTaper": 0,
+  "colorMergeSoftness": 0,
+  "mergeTintColor": "#D9DECA",
+  "colorMergeTrunkExempt": false,
+  "colorMergeCurve": 0.4,
+  "trunkOnTop": false,
+  "mergeAlphaFade": 0,
+  "bendSpread": 0.2,
+  "branchWidthScale": 1.0,
+  "branchWidthScales": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+
+  "colorTimelineEnabled": false,
+  "colorTimeline": [],
+  "colorTimelineRailOffsets": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+
+  "containersEnabled": false,
+  "containerColor": "#ABE0BC",
+  "containerOffset": 105,
+  "containerHalfW": 10,
+  "containerHullSticky": true,
+  "containerHullStickyKeyframes": [
+    { "t": 0.00, "v": 0 },
+    { "t": 0.15, "v": 0 },
+    { "t": 0.22, "v": 1 },
+    { "t": 0.95, "v": 1 },
+    { "t": 1.00, "v": 0 }
+  ],
+
+  "mergeUnion": false,
+  "reversePaintOrder": false,
+  "perRailPhase": false,
+  "phaseRangeY": 0,
+
+  "minimapDrawMode": false,
+  "userEvents": [],
+  "drawInitLanes": "2 3 4",
+  "simMode": "scripted",
+  "simScript": "high_security",
+  "loopSegs": 24,
+  "seed": 1,
+  "mergeChance": 0.2,
+  "splitChance": 0.17,
+  "spawnChance": 0.2,
+  "endChance": 0.05,
+  "maxTracks": 9,
+
+  "exportFrames": 800,
+  "exportFps": 60,
+  "exportWidth": 1920,
+  "exportHeight": 1080,
+  "aspectLock": true,
+  "targetFps": 60,
+  "cameraPixelSnap": true,
+
+  "modulators": []
+}

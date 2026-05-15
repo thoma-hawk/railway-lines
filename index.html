@@ -240,6 +240,8 @@
               <option value="merge1">merge1 — single split/merge cycle</option>
               <option value="container_loop">container_loop — 1 rail → 2 → 1 (no trunk through middle)</option>
               <option value="high_cpu">high_cpu — pale trunk + thin red CPU spike + fat blue (behind red)</option>
+              <option value="high_cpu_v2">high_cpu_v2 — same with parking phase (red/blue start soft on pale before branching)</option>
+              <option value="high_security">high_security — pale trunk splits into 2 narrow rails wrapped by a green container</option>
             </select>
           </label>
         </div>
@@ -493,8 +495,17 @@
   <!-- JSZip — used as a fallback when the File System Access API isn't
        available (Firefox / Safari) so the export bundles into one .zip. -->
   <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="sim.js?v=88"></script>
-  <script src="app-three.js?v=91"></script>
+  <script>
+    // Auto cache-bust on every load — kills stale-script confusion during
+    // local iteration. Uses Date.now() so reloads always pull the latest
+    // edit. document.write keeps the synchronous load order (sim.js first,
+    // then app-three.js) that the rest of the page depends on.
+    (function () {
+      var v = Date.now();
+      document.write('<script src="sim.js?v=' + v + '"><\/script>');
+      document.write('<script src="app-three.js?v=' + v + '"><\/script>');
+    })();
+  </script>
   <!-- Deploy overlay: GSAP-driven gradient sweep on top of the engine. -->
   <script src="deploy-anim/vendor/gsap.min.js"></script>
   <script src="deploy-overlay.js"></script>

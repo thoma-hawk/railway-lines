@@ -1,0 +1,252 @@
+{
+  "speed": 0,
+  "viewZoom": 0.35,
+  "segW": 3500,
+  "laneSpace": 96,
+  "railWidth": 90,
+  "railSoft": 0,
+  "railSigma": 0.61,
+  "railOpacity": 0.96,
+  "bgColor": "#F1EFE8",
+  "railProfile": "figma",
+  "laneShoulderColors": [
+    "#E9F3CD",
+    "#DE4D0E",
+    "#5D96F4",
+    "#5D96F4",
+    "#5D96F4",
+    "#5D96F4",
+    "#5D96F4",
+    "#5D96F4",
+    "#5D96F4"
+  ],
+  "laneShoulderOpacities": [
+    0.5,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "laneEdgeColors": [
+    "#E7E5DD",
+    "#F1EFE8",
+    "#C9C6BC",
+    "#C9C6BC",
+    "#C9C6BC",
+    "#C9C6BC",
+    "#C9C6BC",
+    "#C9C6BC",
+    "#C9C6BC"
+  ],
+  "railEdgeColor": "#F1EFE8",
+  "profileCore": 0.22,
+  "profileShoulder": 0.8,
+  "blendMode": "normal",
+  "laneColors": [
+    "#D9DECA",
+    "#DE4D0E",
+    "#1923A8",
+    "#1923A8",
+    "#1923A8",
+    "#1923A8",
+    "#1923A8",
+    "#1923A8",
+    "#1923A8"
+  ],
+  "paletteHueOffset": 0,
+  "paletteSat": 0.62,
+  "paletteLight": 0.5,
+  "tickAmount": 1,
+  "tickSpacing": 150,
+  "tickWidth": 2,
+  "tickColor": "#F1EFE8",
+  "tickMotionBlur": 0,
+  "inkTrapAmount": 0,
+  "inkTrapSpacing": 1050,
+  "inkTrapDensity": 0.45,
+  "inkTrapWidth": 368,
+  "inkTrapDirection": 0.28,
+  "burstAmount": 0,
+  "burstDensity": 0.5,
+  "burstCell": 600,
+  "burstLenMin": 0.25,
+  "burstLenMax": 0.85,
+  "burstSpeed": 800,
+  "burstRailSpread": 0.6,
+  "burstColor": "#DE4D0E",
+  "burstLockToRail": false,
+  "phasePillSpacing": 137,
+  "phasePillLength": 19,
+  "phasePillHeight": 68,
+  "phasePillOpacityA": 1,
+  "phaseColorA": "#a2a792",
+  "convergencePattern": "adjacent",
+  "convergenceTaper": 0,
+  "colorMergeTaper": 1,
+  "colorMergeSoftness": 0,
+  "colorMergeOnlyInbound": true,
+  "mergeTintColor": "#D9DECA",
+  "colorMergeTrunkExempt": true,
+  "colorMergeCurve": 0.4,
+  "trunkOnTop": false,
+  "mergeAlphaFade": 0,
+  "bendSpread": 0.85,
+  "branchWidthScale": 1,
+  "branchWidthScales": [
+    0,
+    0.12,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "laneHaloAmount": [
+    0,
+    1,
+    0.25,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "laneHaloSigma": [
+    0,
+    3,
+    0.6,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "colorTimelineEnabled": false,
+  "colorTimeline": [],
+  "colorTimelineRailOffsets": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "containersEnabled": false,
+  "containerColor": "#ABE0BC",
+  "containerOffset": 0,
+  "containerHalfW": 4,
+  "containerHullSticky": false,
+  "containerHullStickyKeyframes": [
+    {
+      "t": 0,
+      "v": 0
+    },
+    {
+      "t": 0.18,
+      "v": 0
+    },
+    {
+      "t": 0.22,
+      "v": 1
+    },
+    {
+      "t": 0.98,
+      "v": 1
+    },
+    {
+      "t": 1,
+      "v": 0
+    }
+  ],
+  "mergeUnion": false,
+  "reversePaintOrder": true,
+  "trunkOnBottom": true,
+  "perRailPhase": true,
+  "phaseRangeY": 0,
+  "minimapDrawMode": false,
+  "userEvents": [],
+  "drawInitLanes": "1 3 5",
+  "simMode": "scripted",
+  "simScript": "high_cpu_v2",
+  "loopSegs": 34,
+  "seed": 1,
+  "mergeChance": 0.2,
+  "splitChance": 0.17,
+  "spawnChance": 0.2,
+  "endChance": 0.05,
+  "maxTracks": 9,
+  "deploySweepDur": 2,
+  "deploySweepDepth": 0.14,
+  "deployHold": 0.8,
+  "deployOpacity": 0.85,
+  "deployBlend": "multiply",
+  "deployBrandTop": "#4F8669",
+  "deployBrandMid": "#D8AB56",
+  "deployBrandBot": "#E9C6C5",
+  "exportFrames": 800,
+  "exportFps": 60,
+  "exportWidth": 1920,
+  "exportHeight": 1080,
+  "aspectLock": true,
+  "targetFps": 60,
+  "cameraPixelSnap": true,
+  "modulators": [
+    {
+      "target": "tickSpacing",
+      "min": 120,
+      "max": 210,
+      "waveform": "keyframes",
+      "enabled": true,
+      "lockToLoop": true,
+      "t": 29.019926080668487,
+      "keyframes": [
+        {
+          "t": 0,
+          "v": 150,
+          "ease": "linear",
+          "_note": "seg 0 — trunk only"
+        },
+        {
+          "t": 3,
+          "v": 150,
+          "ease": "easeInOut",
+          "_note": "seg 3 — red parks on pale"
+        },
+        {
+          "t": 7,
+          "v": 200,
+          "ease": "easeInOut",
+          "_note": "seg 7 — red bends out / starts to drift"
+        },
+        {
+          "t": 25,
+          "v": 200,
+          "ease": "easeInOut",
+          "_note": "seg 25 — red dead-ends"
+        },
+        {
+          "t": 28,
+          "v": 150,
+          "ease": "linear",
+          "_note": "seg 28 — back to in sync after red gone"
+        },
+        {
+          "t": 34,
+          "v": 150,
+          "_note": "seg 34 — loop wrap"
+        }
+      ]
+    }
+  ]
+}

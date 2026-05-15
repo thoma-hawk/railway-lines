@@ -89,7 +89,7 @@
   "colorMergeTaper": 1,
   "colorMergeSoftness": 0,
   "mergeTintColor": "#D9DECA",
-  "colorMergeTrunkExempt": false,
+  "colorMergeTrunkExempt": true,
   "colorMergeCurve": 0.4,
   "trunkOnTop": true,
   "mergeAlphaFade": 0.6,

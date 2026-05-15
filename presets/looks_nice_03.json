@@ -1,0 +1,258 @@
+{
+  "speed": 8850,
+  "viewZoom": 0.5,
+  "segW": 3000,
+  "laneSpace": 600,
+  "railWidth": 97,
+  "railSoft": 0,
+  "railSigma": 0.2,
+  "railOpacity": 0.8,
+  "bgColor": "#d9d5d4",
+  "railProfile": "figma",
+  "laneShoulderColors": [
+    "#dee8c5",
+    "#E9F3CD",
+    "#E9F3CD",
+    "#E9F3CD",
+    "#E9F3CD",
+    "#E9F3CD",
+    "#E9F3CD",
+    "#E9F3CD",
+    "#E9F3CD"
+  ],
+  "laneShoulderOpacities": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "laneEdgeColors": [
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8",
+    "#F1EFE8"
+  ],
+  "railEdgeColor": "#d2d0d0",
+  "profileCore": 0,
+  "profileShoulder": 0.8,
+  "blendMode": "darken",
+  "laneColors": [
+    "#b08b8b",
+    "#b0a48b",
+    "#a4b08b",
+    "#8bb08b",
+    "#8bb0a4",
+    "#8ba4b0",
+    "#8b8bb0",
+    "#a48bb0",
+    "#b08ba4"
+  ],
+  "paletteHueOffset": 0,
+  "paletteSat": 0.19,
+  "paletteLight": 0.62,
+  "tickAmount": 0,
+  "tickSpacing": 150,
+  "tickWidth": 2,
+  "tickColor": "#F1EFE8",
+  "tickMotionBlur": 0,
+  "inkTrapAmount": 0,
+  "inkTrapSpacing": 1050,
+  "inkTrapDensity": 0.45,
+  "inkTrapWidth": 368,
+  "inkTrapDirection": 0.28,
+  "burstAmount": 1,
+  "burstDensity": 0.33,
+  "burstCell": 1380,
+  "burstLenMin": 0.05,
+  "burstLenMax": 1,
+  "burstSpeed": 5000,
+  "burstRailSpread": 0.37,
+  "burstColor": "#DE4D0E",
+  "burstLockToRail": false,
+  "phasePillSpacing": 137,
+  "phasePillLength": 19,
+  "phasePillHeight": 68,
+  "phasePillOpacityA": 1,
+  "phaseColorA": "#a2a792",
+  "convergencePattern": "adjacent",
+  "convergenceTaper": 1,
+  "colorMergeTaper": 1,
+  "colorMergeSoftness": 1,
+  "colorMergeOnlyInbound": false,
+  "mergeTintColor": "#4d4e60",
+  "colorMergeTrunkExempt": true,
+  "colorMergeCurve": 3,
+  "trunkOnTop": false,
+  "mergeAlphaFade": 0.38,
+  "bendSpread": 0.01,
+  "branchWidthScale": 2.35,
+  "branchWidthScales": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "laneHaloAmount": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "laneHaloSigma": [
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5
+  ],
+  "colorTimelineEnabled": false,
+  "colorTimeline": [
+    {
+      "t": 0,
+      "core": "#D9DECA",
+      "shoulder": "#E9F3CD",
+      "shoulderOpacity": 1
+    },
+    {
+      "t": 0.2,
+      "core": "#D9DECA",
+      "shoulder": "#E9F3CD",
+      "shoulderOpacity": 1
+    },
+    {
+      "t": 0.32,
+      "core": "#FAB936",
+      "shoulder": "#FED2B5",
+      "shoulderOpacity": 1
+    },
+    {
+      "t": 0.55,
+      "core": "#FAB936",
+      "shoulder": "#FED2B5",
+      "shoulderOpacity": 1
+    },
+    {
+      "t": 0.7,
+      "core": "#1923A8",
+      "shoulder": "#5D96F4",
+      "shoulderOpacity": 1
+    },
+    {
+      "t": 0.85,
+      "core": "#1923A8",
+      "shoulder": "#5D96F4",
+      "shoulderOpacity": 1
+    },
+    {
+      "t": 1,
+      "core": "#D9DECA",
+      "shoulder": "#E9F3CD",
+      "shoulderOpacity": 1
+    }
+  ],
+  "colorTimelineRailOffsets": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "containersEnabled": false,
+  "containerColor": "#ABE0BC",
+  "containerOffset": 40,
+  "containerHalfW": 43,
+  "containerHullSticky": false,
+  "containerHullStickyKeyframes": [
+    {
+      "t": 0,
+      "v": 0
+    },
+    {
+      "t": 0.18,
+      "v": 0
+    },
+    {
+      "t": 0.22,
+      "v": 1
+    },
+    {
+      "t": 0.98,
+      "v": 1
+    },
+    {
+      "t": 1,
+      "v": 0
+    }
+  ],
+  "mergeUnion": false,
+  "reversePaintOrder": false,
+  "trunkOnBottom": false,
+  "perRailPhase": false,
+  "phaseRangeY": 0,
+  "minimapDrawMode": false,
+  "userEvents": [],
+  "drawInitLanes": "0 3 6",
+  "simMode": "procedural",
+  "simScript": "v1",
+  "loopSegs": 30,
+  "seed": 1,
+  "mergeChance": 0.2,
+  "splitChance": 0.17,
+  "spawnChance": 0.2,
+  "endChance": 0.05,
+  "maxTracks": 5,
+  "deploySweepDur": 2,
+  "deploySweepDepth": 0.14,
+  "deployHold": 0.8,
+  "deployOpacity": 0.85,
+  "deployBlend": "multiply",
+  "deployBrandTop": "#4F8669",
+  "deployBrandMid": "#D8AB56",
+  "deployBrandBot": "#E9C6C5",
+  "exportFrames": 120,
+  "exportFps": 30,
+  "exportWidth": 1920,
+  "exportHeight": 1080,
+  "aspectLock": true,
+  "targetFps": 60,
+  "cameraPixelSnap": true,
+  "modulators": [
+    {
+      "target": "speed",
+      "min": 8850,
+      "max": 11850,
+      "cycle": 6,
+      "waveform": "sin",
+      "enabled": false,
+      "t": 5.183333333332676
+    }
+  ]
+}

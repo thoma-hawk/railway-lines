@@ -166,6 +166,13 @@ const CONFIG = {
   // used for it (the width-taper phase is untouched). 0 = fade confined
   // to the bend segment; 1 = bleeds ±6 segments into the straight sections.
   colorMergeSoftness: 0,
+  // When true, the colour-merge tint is only applied while a rail is
+  // bending TOWARD the trunk (= inbound, phase increasing across the
+  // segment). This isolates the figma-style "dissolve into trunk" look
+  // to end-merge events, leaving OUT-bends (rails emerging from trunk)
+  // un-tinted. Used by the high_cpu preset so only blue's end-merge
+  // dissolves into the pale trunk colour.
+  colorMergeOnlyInbound: false,
   // Target colour every rail washes toward as `colorMergeTaper` rises.
   // Defaults to the rail edge tone so the fade looks like the figma SVG
   // (saturated body → pale neutral). Use a colour close to bgColor for the
@@ -206,6 +213,14 @@ const CONFIG = {
   // rail (rid 1 → 1.0) in the same render. Empty / NaN / ≤0 entries
   // fall back to `branchWidthScale`. Rail 0 (trunk) is never scaled.
   branchWidthScales: new Array(MAX_LANE_BUCKETS).fill(0),
+  // Per-rail Gaussian halo — when > 0 adds a soft falloff OUTSIDE the
+  // rail's body so the rail looks blurred (matches figma's stroke
+  // with a `feGaussianBlur` filter). Strength 0..1 = halo opacity at
+  // the body edge; sigma = standard deviation in du units (du is
+  // normalised distance from rail centre, du=1 at body edge). Sigma
+  // ~1.5–2 gives the figma look at stroke-width 11 / stdDeviation 20.
+  laneHaloAmount: new Array(MAX_LANE_BUCKETS).fill(0),
+  laneHaloSigma:  new Array(MAX_LANE_BUCKETS).fill(1.5),
 
   // Colour timeline — when enabled, every rail's body colour follows
   // keyframes anchored to the loop's normalised position (0..1). The
@@ -253,6 +268,22 @@ const CONFIG = {
   containerColor:    '#ABE0BC',  // hull fill (matches v2/container.svg)
   containerOffset:   40,         // world-units outward push per non-trunk rail
   containerHalfW:    90,         // hull stroke half-thickness (180 stroke ≈ rail width)
+  // Sticky hull — two fixed horizontal strips at y = ±containerOffset
+  // (top + bottom), gated by loop-position keyframes. Detached from
+  // rail positions: lets the hull stay on AFTER the rails have merged
+  // back to the trunk (the per-rail container collapses when sign(y)
+  // = 0, but the sticky hull keeps rendering as long as strength > 0).
+  // Use the strength keyframes to fade the hull in at the SPLIT seg
+  // and hold it at 1 for the rest of the loop, so the encryption /
+  // protection metaphor stays visible past the visual merge.
+  containerHullSticky:         false,
+  containerHullStickyKeyframes: [
+    { t: 0.00, v: 0 },
+    { t: 0.18, v: 0 },
+    { t: 0.22, v: 1 },
+    { t: 0.98, v: 1 },
+    { t: 1.00, v: 0 }
+  ],
 
   // Merge union — when on, the rails are composited as a single
   // MAX-alpha shape (winner-takes-all colour) instead of per-rail
@@ -269,6 +300,14 @@ const CONFIG = {
   // (so blue can use a normal SPLIT bend that mirrors its MERGE
   // back) while keeping blue behind red visually.
   reversePaintOrder: false,
+
+  // Trunk on bottom — when true, rail 0 (trunk) paints FIRST, before
+  // any non-trunk rail. Combine with reversePaintOrder=true so the
+  // non-trunk rails still composite high-rid → low-rid (giving
+  // red-on-top-of-blue) but red also paints OVER trunk during a
+  // parking phase. Mutually exclusive with trunkOnTop — if both are
+  // set, trunkOnBottom wins.
+  trunkOnBottom: false,
 
   // Per-rail phase — when on, the colour-wash + alpha-fade phase for
   // each bend is computed from the rail's OWN distance from the trunk
@@ -547,7 +586,8 @@ rebuildLaneData();
 
 // ── Rail shader ──────────────────────────────────────────────────────────
 const geo = new THREE.PlaneGeometry(2, 2);
-const mat = new THREE.ShaderMaterial({
+// Expose to window for inspection in browser eval (debug only).
+const mat = window.__mat = new THREE.ShaderMaterial({
   uniforms: {
     uResolution:  { value: new THREE.Vector2(1, 1) },
     uTime:        { value: 0 },
@@ -598,7 +638,8 @@ const mat = new THREE.ShaderMaterial({
     // Convergence — flag enables per-conn merge tapering.
     uConvergenceMode:    { value: 0 },
     uConvergenceTaper:   { value: CONFIG.convergenceTaper },
-    uColorMergeTaper:    { value: CONFIG.colorMergeTaper ?? 0 },
+    uColorMergeTaper:        { value: CONFIG.colorMergeTaper ?? 0 },
+    uColorMergeOnlyInbound:  { value: CONFIG.colorMergeOnlyInbound ? 1 : 0 },
     uMergeTintColor:     { value: new THREE.Color(CONFIG.mergeTintColor || '#C9C6BC') },
     uColorMergeTrunkExempt: { value: CONFIG.colorMergeTrunkExempt ? 1 : 0 },
     uColorMergeCurve:       { value: CONFIG.colorMergeCurve ?? 1 },
@@ -609,6 +650,8 @@ const mat = new THREE.ShaderMaterial({
     // Per-rail overrides: width scale (0 = fall back to uBranchWidthScale),
     // shoulder opacity, and edge colour. Indexed by rail id.
     uBranchWidthScales:      { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uLaneHaloAmount:         { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uLaneHaloSigma:          { value: new Float32Array(MAX_LANE_BUCKETS).fill(1.5) },
     uLaneShoulderOpacities:  { value: new Float32Array(MAX_LANE_BUCKETS).fill(1) },
     uLaneEdgeColors:         { value: Array.from({ length: MAX_LANE_BUCKETS }, () => new THREE.Color('#F1EFE8')) },
 
@@ -631,16 +674,58 @@ const mat = new THREE.ShaderMaterial({
     uContainerColor:    { value: new THREE.Color(CONFIG.containerColor || '#ABE0BC') },
     uContainerOffset:   { value: CONFIG.containerOffset ?? 40 },
     uContainerHalfW:    { value: CONFIG.containerHalfW ?? 90 },
+    // Sticky hull — fixed top + bottom strips, gated by loop keyframes.
+    uContainerHullSticky:           { value: 0 },
+    uContainerHullStickyTs:         { value: new Float32Array(16) },
+    uContainerHullStickyVs:         { value: new Float32Array(16) },
+    uContainerHullStickyCount:      { value: 0 },
 
     // Merge union — single-shape MAX-alpha compositing across all rails.
     uMergeUnion:         { value: CONFIG.mergeUnion ? 1 : 0 },
     uReversePaintOrder:  { value: CONFIG.reversePaintOrder ? 1 : 0 },
+    uTrunkOnBottom:      { value: CONFIG.trunkOnBottom ? 1 : 0 },
     // Per-rail phase mode + the world-Y reference for normalising
     // phase (= max spread distance from trunk lane). Set in
     // _applyConfigCore based on the laneSpace and a reasonable
     // multiplier; the shader normalises |y| / uPhaseRangeY.
     uPerRailPhase:       { value: CONFIG.perRailPhase ? 1 : 0 },
     uPhaseRangeY:        { value: 360 },
+    // Y-position of the trunk in world units. perRailPhase measures
+    // each rail's distance from this Y, not from canvas centre — so a
+    // trunk that lives off-centre (e.g. lane 3 with 9 lanes) still
+    // yields phase=1 right at the trunk.
+    uTrunkY:             { value: 0 },
+    // Per-rail blur taper window (world-X). Per rail:
+    //   startFadeStartWX  – rail's tip; alpha = 0 here, ramping up
+    //   startFadeEndWX    – alpha fade-in completes; rail at full opacity
+    //   startWX           – blur is at full strength (typically same as
+    //                       startFadeStartWX); blur stays full through parking
+    //   taperStartWX      – blur starts to fade (= start of bend)
+    //   endWX             – blur is fully off after the bend
+    //   endFadeStartWX    – blur ramps BACK UP as the rail's life ends
+    //   endFadeEndWX      – blur fully on, alpha fully 0 (= rail terminates)
+    // The visual shape over the rail's life: alpha 0 → 1 fade-in,
+    // uniform blur through parking, blur tapers through bend, sharp
+    // through branched, blur ramps up + alpha drops to 0 at end.
+    uRailHaloStartFadeStartWX: { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailHaloStartFadeEndWX:   { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailHaloStartWX:          { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailHaloTaperStartWX:     { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailHaloEndWX:            { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailHaloEndFadeStartWX:   { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uRailHaloEndFadeEndWX:     { value: new Float32Array(MAX_LANE_BUCKETS) },
+    // Per-rail flag: 1.0 if the rail terminates at the trunk's Y
+    // position (= MERGE-into-trunk style end), 0.0 if it terminates
+    // somewhere else (= END event at a branched position). Used to
+    // suppress the end alpha fade so the color-merge tint can do the
+    // visual "becoming one with the trunk" effect alone — without the
+    // rail simply going transparent on top.
+    uRailEndsAtTrunk:          { value: new Float32Array(MAX_LANE_BUCKETS) },
+    // Mirror flag for the rail's BEGINNING: 1.0 if the rail spawns at
+    // the trunk's Y (= SPLIT-from-trunk style start), 0.0 otherwise.
+    // Used to suppress the start alpha fade-in so the rail emerges via
+    // colour-blend (pale → saturated) instead of via transparency.
+    uRailStartsAtTrunk:        { value: new Float32Array(MAX_LANE_BUCKETS) },
 
     uSegPhases:        { value: segPhaseArray },
     uSegPhasesSoft:    { value: segPhaseSoftArray },
@@ -725,6 +810,7 @@ const mat = new THREE.ShaderMaterial({
     uniform float uConvergenceMode;
     uniform float uConvergenceTaper;
     uniform float uColorMergeTaper;
+    uniform float uColorMergeOnlyInbound;
     uniform vec3  uMergeTintColor;
     uniform float uColorMergeTrunkExempt;
     uniform float uColorMergeCurve;
@@ -734,6 +820,8 @@ const mat = new THREE.ShaderMaterial({
     uniform float uBranchWidthScale;
     // Per-rail overrides (size matches MAX_LANE_BUCKETS = 9).
     uniform float uBranchWidthScales[9];
+    uniform float uLaneHaloAmount[9];
+    uniform float uLaneHaloSigma[9];
     uniform float uLaneShoulderOpacities[9];
     uniform vec3  uLaneEdgeColors[9];
     // Colour timeline — up to 16 stops, lerped by loop position. When
@@ -756,6 +844,13 @@ const mat = new THREE.ShaderMaterial({
     uniform vec3  uContainerColor;
     uniform float uContainerOffset;
     uniform float uContainerHalfW;
+    // Sticky hull — fixed strips at y = +/- uContainerOffset, gated by
+    // a strength curve sampled at the fragment's loopT. Lets the hull
+    // stay visible past the visual merge / through trunk-only segments.
+    uniform float uContainerHullSticky;
+    uniform float uContainerHullStickyTs[16];
+    uniform float uContainerHullStickyVs[16];
+    uniform float uContainerHullStickyCount;
     // Merge union — when > 0.5, composite all rails as a single
     // MAX-alpha shape instead of per-rail alpha-blending. Removes
     // the seams between overlapping soft-edged rails so the merge
@@ -765,8 +860,23 @@ const mat = new THREE.ShaderMaterial({
     // is low-rid → high-rid). Lets a higher-numbered rail paint
     // behind a lower-numbered one without changing event order.
     uniform float uReversePaintOrder;
+    // When > 0.5, paint rid 0 (trunk) FIRST instead of last, so all
+    // non-trunk rails composite ON TOP of the trunk. Combine with
+    // uReversePaintOrder to keep red-on-top-of-blue z-order while
+    // letting both rails paint over the trunk during a parking phase.
+    uniform float uTrunkOnBottom;
     uniform float uPerRailPhase;
     uniform float uPhaseRangeY;
+    uniform float uTrunkY;
+    uniform float uRailHaloStartFadeStartWX[9];
+    uniform float uRailHaloStartFadeEndWX[9];
+    uniform float uRailHaloStartWX[9];
+    uniform float uRailHaloTaperStartWX[9];
+    uniform float uRailHaloEndWX[9];
+    uniform float uRailHaloEndFadeStartWX[9];
+    uniform float uRailHaloEndFadeEndWX[9];
+    uniform float uRailEndsAtTrunk[9];
+    uniform float uRailStartsAtTrunk[9];
     // Per-segment merge phase, one entry per buffer row. 0 = spread,
     // 1 = fully merged. Sized to match WORLD.bufferSegs (33).
     uniform float uSegPhases[33];
@@ -1038,6 +1148,31 @@ const mat = new THREE.ShaderMaterial({
       }
     }
 
+    // Sample the sticky hull's strength at loop fraction t. Same shape
+    // as sampleColorTimeline (lerp between adjacent stops); returns 0
+    // when no keyframes are set.
+    float sampleContainerHullSticky(float t) {
+      int cnt = int(uContainerHullStickyCount + 0.5);
+      if (cnt < 1) return 0.0;
+      t = fract(t);
+      float out_ = uContainerHullStickyVs[0];
+      for (int i = 0; i < 15; i++) {
+        if (i + 1 >= cnt) break;
+        float t0 = uContainerHullStickyTs[i];
+        float t1 = uContainerHullStickyTs[i + 1];
+        if (t >= t0 && t < t1) {
+          float u = (t - t0) / max(t1 - t0, 0.0001);
+          out_ = mix(uContainerHullStickyVs[i], uContainerHullStickyVs[i + 1], u);
+          return out_;
+        }
+      }
+      int last = cnt - 1;
+      for (int i = 0; i < 16; i++) {
+        if (i == last) { out_ = uContainerHullStickyVs[i]; return out_; }
+      }
+      return out_;
+    }
+
     // Render the rail body at this fragment. Two-stage:
     //   1. scan every connection, accumulate a max-coverage value into the
     //      owner lane's bucket (so multiple conns of the same rail collapse
@@ -1061,6 +1196,23 @@ const mat = new THREE.ShaderMaterial({
       // fragment touches. Composited BEHIND the rails so the hull
       // shows up as a saturated halo on the outer edges only.
       float containerMaxA = 0.0;
+      // Sticky hull — fixed strips at y = +/- uContainerOffset, gated
+      // by loop-position keyframes. Drawn independently of any rail
+      // so it stays visible past the visual merge / through trunk-only
+      // segments — communicates "encryption / protection still on".
+      if (uContainerHullSticky > 0.5 && uLoopLen > 0.0) {
+        float loopT = fract(wx / uLoopLen);
+        float strength = clamp(sampleContainerHullSticky(loopT), 0.0, 1.0);
+        if (strength > 1e-4) {
+          float aaC  = max(fwidth(wy), 1e-4);
+          float dTop = abs(wy - uContainerOffset) - max(uContainerHalfW, 0.5);
+          float dBot = abs(wy + uContainerOffset) - max(uContainerHalfW, 0.5);
+          float aT   = 1.0 - smoothstep(-aaC, aaC, dTop);
+          float aB   = 1.0 - smoothstep(-aaC, aaC, dBot);
+          float a    = max(aT, aB) * strength;
+          if (a > containerMaxA) containerMaxA = a;
+        }
+      }
       for (int i = 0; i < MAX_LANE_BUCKETS; i++) {
         laneCov[i] = 0.0;
         laneCol[i] = vec3(0.0);
@@ -1105,8 +1257,8 @@ const mat = new THREE.ShaderMaterial({
           float rPhaseSoftStart = phaseSoftStart;
           float rPhaseSoftEnd   = phaseSoftEnd;
           if (uPerRailPhase > 0.5 && uPhaseRangeY > 0.0) {
-            rPhaseStart     = 1.0 - clamp(abs(y1) / uPhaseRangeY, 0.0, 1.0);
-            rPhaseEnd       = 1.0 - clamp(abs(y2) / uPhaseRangeY, 0.0, 1.0);
+            rPhaseStart     = 1.0 - clamp(abs(y1 - uTrunkY) / uPhaseRangeY, 0.0, 1.0);
+            rPhaseEnd       = 1.0 - clamp(abs(y2 - uTrunkY) / uPhaseRangeY, 0.0, 1.0);
             rPhaseSoftStart = rPhaseStart;
             rPhaseSoftEnd   = rPhaseEnd;
           }
@@ -1117,8 +1269,13 @@ const mat = new THREE.ShaderMaterial({
           // the SPLIT/MERGE event fires. uSegPhasesSoft is continuous
           // across segment boundaries, so y1/y2 stay continuous too.
           if (rid != 0 && uConvergenceMode > 0.5 && uBendSpread > 0.0) {
-            y1 = mix(y1, 0.0, clamp(uBendSpread * rPhaseSoftStart, 0.0, 1.0));
-            y2 = mix(y2, 0.0, clamp(uBendSpread * rPhaseSoftEnd,   0.0, 1.0));
+            // Pull toward the trunk's Y, not canvas centre. With an
+            // off-centre trunk (e.g. lane 3 of 9 in high_cpu), pulling
+            // toward 0 would push parked rails AWAY from the trunk;
+            // pulling toward uTrunkY correctly stretches the bend so
+            // the rail's wedge tapers into the trunk's line.
+            y1 = mix(y1, uTrunkY, clamp(uBendSpread * rPhaseSoftStart, 0.0, 1.0));
+            y2 = mix(y2, uTrunkY, clamp(uBendSpread * rPhaseSoftEnd,   0.0, 1.0));
           }
 
           // Branches (rid != 0) optionally render wider than the trunk, so
@@ -1158,7 +1315,13 @@ const mat = new THREE.ShaderMaterial({
           // from 0 at the SPLIT bend to ±uContainerOffset along the
           // parallel run — same automatic smooth-join the rails get.
           if (uContainersEnabled > 0.5) {
-            float push = (rid != 0) ? uContainerOffset : 0.0;
+            // sign(y) directs the push outward from the trunk centerline
+            // (y=0). A rail sitting AT the trunk lane gets sign=0 →
+            // zero push → container collapses to invisible. Non-trunk
+            // lanes get pushed outward by uContainerOffset. This lets
+            // the container automatically "grow" out as rails diverge,
+            // and "retract" as they converge — independent of rail id.
+            float push = uContainerOffset;
             float cy1  = y1 + sign(y1) * push;
             float cy2  = y2 + sign(y2) * push;
             vec2  cE   = ribbonEdges(cy1, cy2, t, max(uContainerHalfW, 0.5));
@@ -1189,7 +1352,21 @@ const mat = new THREE.ShaderMaterial({
           // there's nothing to paint, so we can skip the (expensive) merge
           // tint + burst computation entirely. 1.5 covers the figma
           // shoulder (du≤1) plus a small margin for the gaussian halo.
-          if (abs(dY) > hHalfT * 1.5) continue;
+          // For rails with a per-rail blur halo, the gaussian profile
+          // extends ~3σ beyond the body — widen the early-out for those.
+          float earlyOutFactor = 1.5;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) {
+              if (uLaneHaloAmount[k] > 0.0001) {
+                // Wider early-out so the full Gaussian tail (≈5σ) isn't
+                // clipped — clipping makes the halo look like a hard band
+                // instead of a soft fade.
+                earlyOutFactor = max(1.5, 1.0 + 5.5 * max(uLaneHaloSigma[k], 0.05));
+              }
+              break;
+            }
+          }
+          if (abs(dY) > hHalfT * earlyOutFactor) continue;
 
           // Trunk-exempt mode: rid 0 keeps its base colour through the
           // entire cycle. Matches Railway's brand reading where the
@@ -1204,9 +1381,60 @@ const mat = new THREE.ShaderMaterial({
           float colorMixRaw = mix(rPhaseSoftStart, rPhaseSoftEnd, t);
           float colorMixEased = pow(clamp(colorMixRaw, 0.0, 1.0),
                                     max(uColorMergeCurve, 0.05));
-          float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0 && !exemptTrunk)
+          // When uColorMergeOnlyInbound is on, restrict the colour-merge
+          // tint to segments where the rail is bending TOWARD the trunk
+          // (phase increasing across the seg). Lets a preset apply the
+          // figma "dissolve into trunk" tint only at end-merge events
+          // while leaving OUT-bends un-tinted.
+          bool inbound  = rPhaseSoftEnd > rPhaseSoftStart;
+          bool tintGate = (uColorMergeOnlyInbound < 0.5) || inbound;
+          float colorMix = (uConvergenceMode > 0.5 && uColorMergeTaper > 0.0 && !exemptTrunk && tintGate)
                            ? clamp(uColorMergeTaper * colorMixEased, 0.0, 1.0)
                            : 0.0;
+          // Apply colour-merge tint across the rail's end-fade window
+          // (rail dissolves INTO trunk's pale) AND its start-fade window
+          // (rail emerges FROM trunk's pale). Both replace the old
+          // alpha-fade behaviour with a smooth pale ↔ saturated colour
+          // transition, so the rail's start and end can mirror each
+          // other symmetrically.
+          if (uColorMergeTaper > 0.0 && !exemptTrunk && uLoopLen > 0.5) {
+            float efStart = uRailHaloEndFadeStartWX[0];
+            float efEnd   = uRailHaloEndFadeEndWX[0];
+            float endsTr  = uRailEndsAtTrunk[0];
+            float sfStart = uRailHaloStartFadeStartWX[0];
+            float sfEnd   = uRailHaloStartFadeEndWX[0];
+            float startsTr = uRailStartsAtTrunk[0];
+            for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+              if (k == rid) {
+                efStart = uRailHaloEndFadeStartWX[k];
+                efEnd   = uRailHaloEndFadeEndWX[k];
+                endsTr  = uRailEndsAtTrunk[k];
+                sfStart = uRailHaloStartFadeStartWX[k];
+                sfEnd   = uRailHaloStartFadeEndWX[k];
+                startsTr = uRailStartsAtTrunk[k];
+                break;
+              }
+            }
+            float wxModColor = mod(wx, uLoopLen);
+            // End side — rail dissolves INTO trunk's pale. OVERRIDE the
+            // colorMix (don't max with the inbound-bend value) so the
+            // tint progresses monotonically across the entire window —
+            // even past the actual bend segment, where the rail sits on
+            // top of the trunk before terminating.
+            if (endsTr > 0.5 && efEnd > efStart + 0.5 &&
+                wxModColor >= efStart && wxModColor <= efEnd) {
+              float endFadeProgress = smoothstep(efStart, efEnd, wxModColor);
+              colorMix = clamp(uColorMergeTaper * endFadeProgress, 0.0, 1.0);
+            }
+            // Start side — rail EMERGES from trunk's pale (mirror of end).
+            // colorMix starts at 1.0 (full pale) and ramps to 0.0
+            // (saturated) across the start-fade window.
+            if (startsTr > 0.5 && sfEnd > sfStart + 0.5 &&
+                wxModColor >= sfStart && wxModColor <= sfEnd) {
+              float startFadeProgress = smoothstep(sfStart, sfEnd, wxModColor);
+              colorMix = clamp(uColorMergeTaper * (1.0 - startFadeProgress), 0.0, 1.0);
+            }
+          }
           // Base colours — either the per-rail palette (default) or the
           // colour timeline sampled by this fragment's loop position.
           vec3 baseCore = laneColor(rid);
@@ -1259,13 +1487,132 @@ const mat = new THREE.ShaderMaterial({
             // Figma profile — body itself has soft edges. du = 0 at the
             // rail center, du = 1 at the body's outer edge.
             float du   = abs(dY) / max(hHalfT, 1e-4);
-            // Use the shoulder-aware alpha so the shoulder zone can be
-            // semi-transparent (figma gradient stops at 0.5 alpha) —
-            // makes the bg visible through the shoulder band, exactly
-            // like the figma source's pale rail.
             float pA   = figmaProfileAlphaWithShoulder(du, shoulderOpacity);
-            alpha      = pA * clamp(uRailOpacity, 0.0, 1.0);
-            fragCol    = figmaProfileColor(du, ridSat, ridShl, ridEdge);
+            vec3  figmaCol = figmaProfileColor(du, ridSat, ridShl, ridEdge);
+            alpha    = pA * clamp(uRailOpacity, 0.0, 1.0);
+            fragCol  = figmaCol;
+            // Per-rail progressive blur — when laneHaloAmount > 0, the
+            // rail's profile blends from figma (sharp body) to a wide
+            // Gaussian (soft, wider, dimmer at centre) based on blurStrength.
+            // blurStrength scales with the local phase (1 at trunk lane,
+            // 0 at branch lane via perRailPhase), so the rail looks
+            // blurry where it parks and becomes sharp where it settles
+            // — exactly figma's "progressive layer blur" effect.
+            float laneHalo = 0.0;
+            float laneHaloSig = 1.5;
+            for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+              if (k == rid) {
+                laneHalo    = uLaneHaloAmount[k];
+                laneHaloSig = max(uLaneHaloSigma[k], 0.05);
+                break;
+              }
+            }
+            if (laneHalo > 0.0001) {
+              float phaseAtT = mix(rPhaseStart, rPhaseEnd, t);
+              // Phase falloff — gates the START-side blur. High when
+              // the rail is close to the trunk, zero when branched.
+              float phaseFalloff = smoothstep(0.05, 0.30, phaseAtT);
+              float startFadeStartWX = uRailHaloStartFadeStartWX[0];
+              float startFadeEndWX   = uRailHaloStartFadeEndWX[0];
+              float startWX          = uRailHaloStartWX[0];
+              float taperStartWX     = uRailHaloTaperStartWX[0];
+              float endWX            = uRailHaloEndWX[0];
+              float endFadeStartWX   = uRailHaloEndFadeStartWX[0];
+              float endFadeEndWX     = uRailHaloEndFadeEndWX[0];
+              for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+                if (k == rid) {
+                  startFadeStartWX = uRailHaloStartFadeStartWX[k];
+                  startFadeEndWX   = uRailHaloStartFadeEndWX[k];
+                  startWX          = uRailHaloStartWX[k];
+                  taperStartWX     = uRailHaloTaperStartWX[k];
+                  endWX            = uRailHaloEndWX[k];
+                  endFadeStartWX   = uRailHaloEndFadeStartWX[k];
+                  endFadeEndWX     = uRailHaloEndFadeEndWX[k];
+                  break;
+                }
+              }
+              float startSide = 0.0;
+              float endSide   = 0.0;
+              if (uLoopLen > 0.5) {
+                // wx is unbounded; uRailHalo*WX are loop-local. Wrap.
+                float wxMod = mod(wx, uLoopLen);
+                // Start side: full blur across parked, tapering through bend.
+                // Modulated by phaseFalloff so it dies off naturally when
+                // the rail moves far from the trunk during the bend.
+                if (endWX > startWX + 0.5 && wxMod >= startWX && wxMod <= endWX) {
+                  float startLen;
+                  if (wxMod <= taperStartWX) startLen = 1.0;
+                  else startLen = 1.0 - smoothstep(taperStartWX, endWX, wxMod);
+                  startSide = startLen * phaseFalloff;
+                }
+                // End side: blur ramps back up as the rail's life ends.
+                // NOT gated by phaseFalloff — the rail terminates at its
+                // branched position (phase ≈ 0), so we want blur to
+                // appear there to fade the tail into the bg.
+                if (endFadeEndWX > endFadeStartWX + 0.5 &&
+                    wxMod >= endFadeStartWX && wxMod <= endFadeEndWX) {
+                  endSide = smoothstep(endFadeStartWX, endFadeEndWX, wxMod);
+                }
+              }
+              float blurStrength = laneHalo * max(startSide, endSide);
+              // Alpha fade windows — independent of the Gaussian blur
+              // dilution. The blur softens the centre, but the rail
+              // still has finite opacity at its spawn/termination
+              // boundaries; without these multipliers the rail would
+              // appear and disappear abruptly. The start fade ramps
+              // alpha 0 → 1 (rail emerges from the bg); the end fade
+              // drops 1 → 0 (rail dissolves into the bg).
+              float startAlphaFade = 1.0;
+              float endAlphaFade   = 1.0;
+              if (uLoopLen > 0.5) {
+                float wxMod2 = mod(wx, uLoopLen);
+                if (startFadeEndWX > startFadeStartWX + 0.5) {
+                  // Always apply the alpha fade — it works in
+                  // combination with the colour-merge tint (defined
+                  // below) for trunk-spawning rails. The alpha ramp
+                  // grows the rail's contribution to the compositing
+                  // gradually so subtle rails don't create a visible
+                  // "step" where their full-opacity body suddenly
+                  // adds onto the trunk's existing pale body.
+                  if (wxMod2 < startFadeStartWX) {
+                    startAlphaFade = 0.0;
+                  } else if (wxMod2 <= startFadeEndWX) {
+                    startAlphaFade = smoothstep(startFadeStartWX, startFadeEndWX, wxMod2);
+                  }
+                }
+                if (endFadeEndWX > endFadeStartWX + 0.5 &&
+                    wxMod2 >= endFadeStartWX && wxMod2 <= endFadeEndWX) {
+                  // Always apply the alpha fade — combined with the
+                  // colour-merge tint below for trunk-merging rails,
+                  // it gives a true seamless dissolve (the rail's
+                  // contribution shrinks gradually rather than adding
+                  // full-opacity pale body on top of trunk).
+                  endAlphaFade = 1.0 - smoothstep(endFadeStartWX, endFadeEndWX, wxMod2);
+                }
+              }
+              // Normalized Gaussian: peak ≈ 1/σ so total "ink" under
+              // the curve is preserved. This matches what figma's
+              // layer blur does to a thin stroke — wider σ means the
+              // centre dilutes proportionally, so the rail reads as a
+              // truly diffuse band (no sharp inner line) rather than a
+              // saturated line wearing a glow. Without normalization
+              // the centre stays at peak=1 regardless of σ and the
+              // rail just looks "thick + saturated", which the figma
+              // reference doesn't.
+              float duSq       = du * du;
+              float sigW       = max(laneHaloSig, 0.05);
+              // Peak coefficient calibrated against the figma reference:
+              // at σ=3 (the red preset), peak ≈ 0.40, which reads as
+              // ~45% of full saturation at the centre — matching figma's
+              // measured profile (peak G=166 on pale bg). Clamped to 1.0
+              // so smaller σ (e.g. blue's σ=0.6) doesn't oversaturate
+              // — the figma 6-stop profile already handles the centre's
+              // full-opacity look in that case.
+              float gaussPeak  = min(1.2 / sigW, 1.0);
+              float gaussAlpha = gaussPeak * exp(-duSq / (2.0 * sigW * sigW));
+              alpha   = mix(pA, gaussAlpha, blurStrength) * clamp(uRailOpacity, 0.0, 1.0) * startAlphaFade * endAlphaFade;
+              fragCol = mix(figmaCol, ridSat, blurStrength);
+            }
           } else {
             // Gaussian profile (default) — crisp body + soft halo outside.
             float fillCov = 1.0 - smoothstep(-aa, aa, d);
@@ -1332,12 +1679,24 @@ const mat = new THREE.ShaderMaterial({
           if (unionA > maxA) maxA = unionA;
         }
       } else {
+        // Pass 0: when uTrunkOnBottom is on, paint rid 0 (trunk) FIRST
+        // so every non-trunk rail composites on top of it. Forces
+        // normal blend on the trunk paint.
+        if (uTrunkOnBottom > 0.5) {
+          float a0 = laneCov[0];
+          if (a0 >= 1e-4) {
+            vec3 src = laneCol[0];
+            dst = mix(dst, src, a0);
+            if (a0 > maxA) maxA = a0;
+          }
+        }
         // Pass 1: composite rails 1..N (non-trunk) first when trunk-on-top
         // is on, so the trunk paints over the greens. When off, just walk
         // 0..N in order (original behaviour). uReversePaintOrder walks
         // high->low so a higher-rid rail paints first (behind a lower-rid
-        // rail) - used by the high_cpu story.
-        int startI = (uTrunkOnTop > 0.5) ? 1 : 0;
+        // rail) - used by the high_cpu story. With trunkOnBottom we also
+        // skip rid 0 in the loop (already painted above).
+        int startI = (uTrunkOnTop > 0.5 || uTrunkOnBottom > 0.5) ? 1 : 0;
         if (uReversePaintOrder > 0.5) {
           for (int j = 0; j < MAX_LANE_BUCKETS; j++) {
             int i = MAX_LANE_BUCKETS - 1 - j;
@@ -1562,6 +1921,12 @@ function stepModulators(dt) {
   const list = CONFIG.modulators;
   if (!Array.isArray(list) || list.length === 0) return;
   let touched = false;
+  // Topology loop length in world units, used by `lockToLoop` modulators
+  // to tie their phase to the camera's loop fraction instead of real time.
+  const loopLenWu = Math.max(1, (CONFIG.loopSegs | 0) * (CONFIG.segW | 0));
+  const loopFrac  = (typeof WORLD !== 'undefined')
+    ? ((((WORLD.cameraX || 0) % loopLenWu) + loopLenWu) % loopLenWu) / loopLenWu
+    : 0;
   for (const m of list) {
     if (!m || !m.enabled) continue;
     migrateModulator(m);
@@ -1572,15 +1937,26 @@ function stepModulators(dt) {
     if (m.waveform === 'keyframes' && Array.isArray(m.keyframes) && m.keyframes.length >= 2) {
       // Keyframe envelope. The cycle period is implicit — it's the
       // largest t in the keyframe list, so adding a final keyframe at
-      // (period, startValue) closes the loop. m.t advances by dt and
-      // wraps modulo that period.
+      // (period, startValue) closes the loop. When `lockToLoop` is on
+      // m.t = loopFraction × period — the modulator runs in lockstep
+      // with the camera's loop position, so changing speed or tweaking
+      // segW / loopSegs keeps the keyframes aligned to the topology
+      // events. Otherwise m.t advances by real-time dt.
       const last = m.keyframes.reduce((mx, k) => Math.max(mx, k.t || 0), 0);
       const period = Math.max(last, 0.05);
-      m.t = (((m.t || 0) + dt) % period + period) % period;
+      if (m.lockToLoop) {
+        m.t = loopFrac * period;
+      } else {
+        m.t = (((m.t || 0) + dt) % period + period) % period;
+      }
       val = evalKeyframes(m.t, m.keyframes);
     } else {
       const cycle = Math.max(m.cycle || 0.05, 0.05);
-      m.t = (((m.t || 0) + dt) % cycle + cycle) % cycle;
+      if (m.lockToLoop) {
+        m.t = loopFrac * cycle;
+      } else {
+        m.t = (((m.t || 0) + dt) % cycle + cycle) % cycle;
+      }
       const wave = (MOD_WAVEFORMS.find(w => w.key === m.waveform) || MOD_WAVEFORMS[0]).fn;
       const v01  = wave(m.t / cycle);                        // shape fn returns 0..1
       val = m.min + (m.max - m.min) * v01;
@@ -1955,8 +2331,25 @@ function pushContainersToUniforms() {
   mat.uniforms.uContainerColor.value.set(CONFIG.containerColor || '#ABE0BC');
   mat.uniforms.uContainerOffset.value   = Number(CONFIG.containerOffset) || 0;
   mat.uniforms.uContainerHalfW.value    = Math.max(0.5, Number(CONFIG.containerHalfW) || 90);
+  // Sticky hull keyframes.
+  mat.uniforms.uContainerHullSticky.value = CONFIG.containerHullSticky ? 1 : 0;
+  const stickyKfs = Array.isArray(CONFIG.containerHullStickyKeyframes)
+    ? CONFIG.containerHullStickyKeyframes
+        .filter(k => k && typeof k === 'object')
+        .map(k => ({ t: Math.max(0, Math.min(1, Number(k.t) || 0)), v: Math.max(0, Math.min(1, Number(k.v) || 0)) }))
+        .sort((a, b) => a.t - b.t)
+        .slice(0, 16)
+    : [];
+  const stickyTs = mat.uniforms.uContainerHullStickyTs.value;
+  const stickyVs = mat.uniforms.uContainerHullStickyVs.value;
+  for (let i = 0; i < 16; i++) {
+    if (i < stickyKfs.length) { stickyTs[i] = stickyKfs[i].t; stickyVs[i] = stickyKfs[i].v; }
+    else                      { stickyTs[i] = 1;             stickyVs[i] = 0; }
+  }
+  mat.uniforms.uContainerHullStickyCount.value = stickyKfs.length;
   mat.uniforms.uMergeUnion.value        = CONFIG.mergeUnion ? 1 : 0;
   mat.uniforms.uReversePaintOrder.value = CONFIG.reversePaintOrder ? 1 : 0;
+  mat.uniforms.uTrunkOnBottom.value     = CONFIG.trunkOnBottom ? 1 : 0;
   mat.uniforms.uPerRailPhase.value      = CONFIG.perRailPhase ? 1 : 0;
   // phaseRangeY is computed AFTER rebuildLaneData (which calls
   // SIM.setLaneSpace and refreshes the sim's connection cache), so
@@ -1967,25 +2360,195 @@ function pushContainersToUniforms() {
 // otherwise auto-detect the max |y| any rail reaches across the loop.
 // Called AFTER SIM has been reconfigured + lane data rebuilt.
 function pushPhaseRangeY() {
+  // First detect the trunk's Y position — rail 0's y across the loop.
+  // We use rail 0's median y so a trunk that's offset from canvas
+  // centre still anchors phase = 1 right on the trunk.
+  let trunkY = 0;
+  if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
+    const loopLen = SIM.LOOP_SEGS || CONFIG.loopSegs || 1;
+    const trunkYs = [];
+    for (let s = 0; s < loopLen; s++) {
+      const conns = SIM.connectionsAt(s);
+      for (const c of conns) {
+        if (c.rid === 0 || c.id === 0) {
+          trunkYs.push(SIM.laneToY(c.y1));
+          trunkYs.push(SIM.laneToY(c.y2));
+        }
+      }
+    }
+    if (trunkYs.length > 0) {
+      trunkYs.sort((a, b) => a - b);
+      trunkY = trunkYs[Math.floor(trunkYs.length / 2)];
+    }
+  }
+  mat.uniforms.uTrunkY.value = trunkY;
+
   const explicit = Number(CONFIG.phaseRangeY) || 0;
   if (explicit > 0) {
     mat.uniforms.uPhaseRangeY.value = explicit;
     return;
   }
-  let maxAbsY = 0;
+  // Auto-detect: max |y - trunkY| any rail reaches.
+  let maxDist = 0;
   if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
     const loopLen = SIM.LOOP_SEGS || CONFIG.loopSegs || 1;
     for (let s = 0; s < loopLen; s++) {
       const conns = SIM.connectionsAt(s);
       for (const c of conns) {
-        const a1 = Math.abs(SIM.laneToY(c.y1));
-        const a2 = Math.abs(SIM.laneToY(c.y2));
-        if (a1 > maxAbsY) maxAbsY = a1;
-        if (a2 > maxAbsY) maxAbsY = a2;
+        const a1 = Math.abs(SIM.laneToY(c.y1) - trunkY);
+        const a2 = Math.abs(SIM.laneToY(c.y2) - trunkY);
+        if (a1 > maxDist) maxDist = a1;
+        if (a2 > maxDist) maxDist = a2;
       }
     }
   }
-  mat.uniforms.uPhaseRangeY.value = (maxAbsY > 0.5) ? maxAbsY : 360;
+  mat.uniforms.uPhaseRangeY.value = (maxDist > 0.5) ? maxDist : 360;
+
+  // Per-rail length-taper window. For each rail with a halo amount,
+  // find: (a) start of the parked run, (b) end of the parked run
+  // (= start of the bend), (c) end of the bend, and (d) the LAST
+  // active segment (= where the rail terminates via END / MERGE-into-
+  // another). The blur is full across the parked range, tapers across
+  // the bend, sharp through the branched range, then ramps back up
+  // over the last ~2 segments before the rail terminates so the tail
+  // softens into whatever's beneath.
+  const startFadeStArr = mat.uniforms.uRailHaloStartFadeStartWX.value;
+  const startFadeEnArr = mat.uniforms.uRailHaloStartFadeEndWX.value;
+  const startArr       = mat.uniforms.uRailHaloStartWX.value;
+  const taperArr       = mat.uniforms.uRailHaloTaperStartWX.value;
+  const endArr         = mat.uniforms.uRailHaloEndWX.value;
+  const endFadeStArr   = mat.uniforms.uRailHaloEndFadeStartWX.value;
+  const endFadeEnArr   = mat.uniforms.uRailHaloEndFadeEndWX.value;
+  const endsAtTrunkArr   = mat.uniforms.uRailEndsAtTrunk.value;
+  const startsAtTrunkArr = mat.uniforms.uRailStartsAtTrunk.value;
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    startFadeStArr[i] = 0; startFadeEnArr[i] = 0;
+    startArr[i] = 0; taperArr[i] = 0; endArr[i] = 0;
+    endFadeStArr[i] = 0; endFadeEnArr[i] = 0;
+    endsAtTrunkArr[i] = 0;
+    startsAtTrunkArr[i] = 0;
+  }
+  if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
+    const loopLen = SIM.LOOP_SEGS || CONFIG.loopSegs || 1;
+    const segW    = CONFIG.segW || 1;
+    const parkThresh = Math.max(20, (maxDist || 200) * 0.25); // y-units
+    const haloAmounts = Array.isArray(CONFIG.laneHaloAmount) ? CONFIG.laneHaloAmount : [];
+    const endFadeSegs = 2;        // for "fuller" rails (red): short end-fade
+    const subtleEndFadeSegs = 6;  // for "subtle" rails (blue): longer end-fade — gives the dissolve time to play out while blue sits on top of the trunk after merging
+    for (let rid = 0; rid < MAX_LANE_BUCKETS; rid++) {
+      const amt = Number(haloAmounts[rid]) || 0;
+      if (!(amt > 0.0001)) continue;
+      let firstActiveSeg = -1;
+      let parkStartSeg = -1, parkEndSeg = -1, bendEndSeg = -1, lastActiveSeg = -1;
+      let endBendStartSeg = -1; // last segment where the rail bent (= when the END bend starts)
+      for (let s = 0; s < loopLen; s++) {
+        const conns = SIM.connectionsAt(s);
+        const c = conns.find(cc => (cc.rid === rid || cc.id === rid));
+        if (!c) {
+          if (parkStartSeg >= 0 && parkEndSeg < 0) parkEndSeg = s;
+          if (parkEndSeg >= 0 && bendEndSeg < 0)   bendEndSeg = s;
+          continue;
+        }
+        if (firstActiveSeg < 0) firstActiveSeg = s;
+        lastActiveSeg = s;
+        const y1 = SIM.laneToY(c.y1), y2 = SIM.laneToY(c.y2);
+        const d1 = Math.abs(y1 - trunkY), d2 = Math.abs(y2 - trunkY);
+        const parked = d1 < parkThresh && d2 < parkThresh && Math.abs(y2 - y1) < parkThresh * 0.5;
+        const bending = Math.abs(y2 - y1) > parkThresh * 0.5;
+        if (parked) {
+          if (parkStartSeg < 0) parkStartSeg = s;
+        } else if (bending) {
+          if (parkStartSeg >= 0 && parkEndSeg < 0) parkEndSeg = s;
+          // Always record the LAST bend segment — used to anchor the
+          // end-fade so it starts when the rail actually starts merging.
+          endBendStartSeg = s;
+        } else {
+          // Stable far-from-trunk: bend has completed
+          if (parkEndSeg >= 0 && bendEndSeg < 0) bendEndSeg = s;
+        }
+      }
+      if (parkStartSeg >= 0) {
+        if (parkEndSeg < 0) parkEndSeg = loopLen;
+        if (bendEndSeg < 0) bendEndSeg = parkEndSeg + 1;
+        startArr[rid] = parkStartSeg * segW;
+        taperArr[rid] = parkEndSeg   * segW;
+        endArr[rid]   = bendEndSeg   * segW;
+      }
+      // Classify rail: "subtle" rails (low halo amount, e.g. blue=0.25)
+      // get extended fade windows on both ends. "Fuller" rails (red=1.0)
+      // keep short fades.
+      const subtle = amt < 0.5;
+      // Start-fade: ramp alpha 0 → 1 across the rail's emergence.
+      // "Subtle" rails get a fade window that STARTS one segment after
+      // spawn (so the rail is invisible at its spawn point AND in the
+      // very first parking segment) and ENDS at the bend's end (where
+      // the rail meets the branched position, e.g. blue touching the
+      // red rail at lane 5). "Fuller" rails keep the short 2-segment
+      // fade right at spawn so their figma-blur look kicks in
+      // immediately at parking.
+      if (firstActiveSeg >= 0 && firstActiveSeg > 0) {
+        let fadeStartSeg = firstActiveSeg;
+        let fadeEndSeg   = firstActiveSeg + endFadeSegs;
+        if (subtle && bendEndSeg > firstActiveSeg) {
+          // Start at the rail's very first segment so the colour-blend
+          // covers the rail's entire emergence (rather than leaving the
+          // first segment as solid saturated colour on top of the trunk).
+          fadeStartSeg = firstActiveSeg;
+          fadeEndSeg   = bendEndSeg;             // = end of bend
+        }
+        startFadeStArr[rid] = fadeStartSeg * segW;
+        startFadeEnArr[rid] = fadeEndSeg   * segW;
+        // Detect SPLIT-from-trunk style start: if the rail's first
+        // segment has y1 close to trunkY, it emerged from the trunk
+        // (vs. just appearing somewhere else).
+        const firstConns = SIM.connectionsAt(firstActiveSeg);
+        const firstConn = firstConns.find(cc => (cc.rid === rid || cc.id === rid));
+        if (firstConn) {
+          const firstY1 = SIM.laneToY(firstConn.y1);
+          if (Math.abs(firstY1 - trunkY) < parkThresh) {
+            startsAtTrunkArr[rid] = 1.0;
+          }
+        }
+      }
+      // End-fade: ramp blur back up over the last few segments before
+      // the rail terminates. Subtle rails (low halo amount, e.g. blue
+      // at 0.25) get a longer fade so the merge "stretches" across more
+      // X distance, mirroring the long start-fade-in. Fuller rails (red)
+      // use a shorter fade.
+      if (lastActiveSeg >= 0 && lastActiveSeg < loopLen - 1) {
+        const railEndSeg = lastActiveSeg + 1;
+        const segsForEnd = subtle ? subtleEndFadeSegs : endFadeSegs;
+        // For subtle rails that have an END bend (merge-back to trunk),
+        // anchor the end-fade to start ~2 segments BEFORE the bend
+        // begins — so the colour blend has already started progressing
+        // when the rail visibly starts bending toward the trunk
+        // (rather than the blend kicking off at the same instant as
+        // the bend, where it's barely visible until partway through).
+        let fadeStartSeg;
+        const preBendLead = 2;
+        if (subtle && endBendStartSeg >= 0 && endBendStartSeg > (bendEndSeg >= 0 ? bendEndSeg : 0)) {
+          fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, endBendStartSeg - preBendLead);
+        } else {
+          fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, railEndSeg - segsForEnd);
+        }
+        if (railEndSeg > fadeStartSeg) {
+          endFadeStArr[rid] = fadeStartSeg * segW;
+          endFadeEnArr[rid] = railEndSeg   * segW;
+        }
+        // Detect MERGE-into-trunk style ending: if the rail's last
+        // segment ends with y2 close to trunkY, it's merging into the
+        // trunk (vs. just terminating at a branched position via END).
+        const lastConns = SIM.connectionsAt(lastActiveSeg);
+        const lastConn = lastConns.find(cc => (cc.rid === rid || cc.id === rid));
+        if (lastConn) {
+          const lastY2 = SIM.laneToY(lastConn.y2);
+          if (Math.abs(lastY2 - trunkY) < parkThresh) {
+            endsAtTrunkArr[rid] = 1.0;
+          }
+        }
+      }
+    }
+  }
 }
 
 function _applyConfigCore(skipMinimap) {
@@ -2065,7 +2628,8 @@ function _applyConfigCore(skipMinimap) {
       || CONFIG.simMode === 'branching'
       || CONFIG.simMode === 'scripted') ? 1 : 0;
   mat.uniforms.uConvergenceTaper.value = CONFIG.convergenceTaper;
-  mat.uniforms.uColorMergeTaper.value  = CONFIG.colorMergeTaper ?? 0;
+  mat.uniforms.uColorMergeTaper.value       = CONFIG.colorMergeTaper ?? 0;
+  mat.uniforms.uColorMergeOnlyInbound.value = CONFIG.colorMergeOnlyInbound ? 1 : 0;
   mat.uniforms.uMergeTintColor.value.set(CONFIG.mergeTintColor || '#C9C6BC');
   mat.uniforms.uColorMergeTrunkExempt.value = CONFIG.colorMergeTrunkExempt ? 1 : 0;
   mat.uniforms.uColorMergeCurve.value       = CONFIG.colorMergeCurve ?? 1;
@@ -2078,6 +2642,14 @@ function _applyConfigCore(skipMinimap) {
     const v = Number(branchScales[i]);
     // 0 (or non-finite) means "use the global branchWidthScale".
     mat.uniforms.uBranchWidthScales.value[i] = (Number.isFinite(v) && v > 0) ? v : 0;
+  }
+  const haloAmounts = Array.isArray(CONFIG.laneHaloAmount) ? CONFIG.laneHaloAmount : [];
+  const haloSigmas  = Array.isArray(CONFIG.laneHaloSigma)  ? CONFIG.laneHaloSigma  : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    const a = Number(haloAmounts[i]);
+    const s = Number(haloSigmas[i]);
+    mat.uniforms.uLaneHaloAmount.value[i] = (Number.isFinite(a) && a >= 0) ? Math.min(1, a) : 0;
+    mat.uniforms.uLaneHaloSigma.value[i]  = (Number.isFinite(s) && s > 0)  ? s : 1.5;
   }
 
   // Colour timeline — clamp + sort + push the up-to-16 keyframes into
@@ -2984,7 +3556,7 @@ function bindGlobalControls() {
       card.appendChild(kfBlock);
     }
 
-    // Row 4: enabled toggle.
+    // Row 4: enabled toggle + lock-to-loop toggle.
     const row4 = document.createElement('div');
     row4.className = 'mod-row';
     const tg = document.createElement('label');
@@ -2999,6 +3571,20 @@ function bindGlobalControls() {
     tg.appendChild(cb);
     tg.appendChild(document.createTextNode(' enabled'));
     row4.appendChild(tg);
+
+    const lockTg = document.createElement('label');
+    lockTg.className = 'mod-toggle';
+    lockTg.style.marginLeft = '8px';
+    lockTg.title = 'Lock the modulator phase to the topology loop, so keyframe t=0 is always seg 0 and t=period is always the loop wrap. Changes to speed / segW / loopSegs keep the keyframes aligned to the same segment events.';
+    const lockCb = document.createElement('input');
+    lockCb.type = 'checkbox';
+    lockCb.checked = !!m.lockToLoop;
+    lockCb.addEventListener('change', () => {
+      m.lockToLoop = lockCb.checked;
+    });
+    lockTg.appendChild(lockCb);
+    lockTg.appendChild(document.createTextNode(' lock to loop'));
+    row4.appendChild(lockTg);
     card.appendChild(row4);
 
     return card;
@@ -3113,22 +3699,123 @@ applyConfig();
 window.RAILWAY = { CONFIG, mat, applyConfig, renderer, scene, camera, WORLD, rebuildLaneData };
 console.log('Railway minimal — sim + rails. Tweak via RAILWAY.CONFIG.');
 
-// Load the default preset on page open. Drops back to the built-in
-// DEFAULT_CONFIG silently if the file isn't reachable so the page still
-// renders something. Same shape as the drag-drop loader: copy only
-// schema-matching keys, then re-apply + sync panel.
-(async () => {
-  try {
-    const res = await fetch('presets/colourExploration_merging_05.json?t=' + Date.now());
-    if (!res.ok) return;
-    const incoming = await res.json();
-    if (typeof incoming !== 'object' || incoming === null) return;
-    for (const key of Object.keys(CONFIG)) {
-      if (key in incoming) CONFIG[key] = incoming[key];
+// Dev sampling helpers. tx, ty ∈ [0,1] are normalised screen coords matching
+// the shader's vUV (ty=0 is the bottom of the canvas, ty=1 the top). Reads
+// pixels straight out of the WebGL drawing buffer — works because the
+// renderer is constructed with preserveDrawingBuffer: true. Returns the
+// decoded sRGB byte values plus the wx the shader would have computed for
+// that x, the loop-wrapped wxMod, and the seg index that wx falls inside.
+//
+// __sample(tx, ty)    → { x, y, r, g, b, wx, wxMod, seg }
+// __sampleColumn(tx)  → { wx, wxMod, seg, height, pixels: Uint8Array(rgb*H) }
+//                       rows are top-to-bottom in the returned pixels buffer
+//                       (so pixels[0..2] are the top row's RGB).
+(() => {
+  const gl = renderer.getContext();
+  function viewDims() {
+    const size = new THREE.Vector2();
+    renderer.getSize(size);
+    const aspect = size.x / size.y;
+    const viewH  = 1000.0 / Math.max(CONFIG.viewZoom, 1e-6);
+    return { w: size.x, h: size.y, viewW: viewH * aspect, viewH };
+  }
+  function wxAt(tx) {
+    const { viewW } = viewDims();
+    const wx = WORLD.cameraX + (tx - 0.5) * viewW;
+    const loopLen = (SIM.LOOP_SEGS || 0) * CONFIG.segW;
+    const wxMod = (loopLen > 0) ? ((wx % loopLen) + loopLen) % loopLen : wx;
+    const seg = (CONFIG.segW > 0) ? Math.floor(wxMod / CONFIG.segW) : 0;
+    return { wx, wxMod, seg };
+  }
+  window.__sample = function (tx, ty) {
+    const { w, h } = viewDims();
+    const x = Math.max(0, Math.min(w - 1, Math.floor(tx * w)));
+    const y = Math.max(0, Math.min(h - 1, Math.floor(ty * h)));
+    const buf = new Uint8Array(4);
+    // gl origin is bottom-left, matches shader vUV.y, so pass y directly.
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    const { wx, wxMod, seg } = wxAt(tx);
+    return { x, y, r: buf[0], g: buf[1], b: buf[2], wx, wxMod, seg };
+  };
+  window.__sampleColumn = function (tx) {
+    const { w, h } = viewDims();
+    const x = Math.max(0, Math.min(w - 1, Math.floor(tx * w)));
+    const rgba = new Uint8Array(h * 4);
+    gl.readPixels(x, 0, 1, h, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    const pixels = new Uint8Array(h * 3);
+    for (let i = 0; i < h; i++) {
+      const src = (h - 1 - i) * 4;
+      const dst = i * 3;
+      pixels[dst]     = rgba[src];
+      pixels[dst + 1] = rgba[src + 1];
+      pixels[dst + 2] = rgba[src + 2];
     }
-    applyConfig();
-    if (typeof syncPanelToConfig === 'function') syncPanelToConfig();
+    const { wx, wxMod, seg } = wxAt(tx);
+    return { wx, wxMod, seg, height: h, pixels };
+  };
+})();
+
+// Load the default preset on page open, with URL-param overrides layered on
+// top. Supported params:
+//   ?preset=<path>  — preset path relative to presets/ (e.g.
+//                     "colour_exploration/colourExploration_merging_05" or
+//                     "looksNice.json"). Falls back to the default preset.
+//   ?camX=<num>     — initial WORLD.cameraX
+//   ?zoom=<num>     — CONFIG.viewZoom
+//   ?speed=<num>    — CONFIG.speed
+// All overrides apply after the preset so URL state always wins. Drops back
+// to DEFAULT_CONFIG silently if the preset isn't reachable so the page still
+// renders something.
+(async () => {
+  const params = new URLSearchParams(window.location.search);
+  const presetParam = params.get('preset');
+  let presetPath = 'presets/colourExploration_merging_05.json';
+  if (presetParam) {
+    const stripped = presetParam.replace(/^\/+/, '');
+    presetPath = 'presets/' + (/\.json$/i.test(stripped) ? stripped : stripped + '.json');
+  }
+  try {
+    const res = await fetch(presetPath + '?t=' + Date.now());
+    if (res.ok) {
+      const incoming = await res.json();
+      if (incoming && typeof incoming === 'object') {
+        for (const key of Object.keys(CONFIG)) {
+          if (key in incoming) CONFIG[key] = incoming[key];
+        }
+      }
+    } else if (presetParam) {
+      console.warn('Preset not found:', presetPath);
+    }
   } catch (err) {
-    console.warn('Default preset load failed:', err);
+    console.warn('Preset load failed:', err);
+  }
+
+  const numParam = (k) => {
+    const raw = params.get(k);
+    if (raw == null) return null;
+    const v = Number(raw);
+    return Number.isFinite(v) ? v : null;
+  };
+  const zoom  = numParam('zoom');
+  const speed = numParam('speed');
+  const camX  = numParam('camX');
+  if (zoom  != null) CONFIG.viewZoom = zoom;
+  if (speed != null) CONFIG.speed    = speed;
+
+  applyConfig();
+  if (typeof syncPanelToConfig === 'function') syncPanelToConfig();
+
+  // cameraX is in WORLD, not CONFIG, so push it directly. Wrap to the loop
+  // length the same way the tick loop does so a stale URL doesn't wedge the
+  // camera past the end of the world.
+  if (camX != null) {
+    const loopLen = (typeof SIM !== 'undefined' && SIM.LOOP_SEGS && CONFIG.segW)
+      ? SIM.LOOP_SEGS * CONFIG.segW : 0;
+    WORLD.cameraX = (loopLen > 0)
+      ? ((camX % loopLen) + loopLen) % loopLen
+      : Math.max(0, camX);
+    mat.uniforms.uCameraX.value = WORLD.cameraX;
+    rebuildLaneData();
+    mat.uniforms.uLaneOriginX.value = WORLD.laneOriginSeg * CONFIG.segW;
   }
 })();
