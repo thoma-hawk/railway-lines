@@ -106,6 +106,30 @@ const CONFIG = {
                            // speed); 1 = full motion-blur (ticks widen to
                            // cover one frame of camera travel — non-flicker
                            // but soft fat bars).
+  // Per-rail "partner" / ghost tick — a dimmer echo tick offset from the
+  // primary tick rhythm. Amplitude scales with the rail's distance from
+  // the trunk so the doubling grows as the rail branches out (overload
+  // story) and fades back to single ticks as it returns (recovery). 0
+  // on every rail by default → no effect, presets keep their look.
+  laneTickPartnerAmount: new Array(MAX_LANE_BUCKETS).fill(0),
+  tickPartnerOffset: 0.18,   // partner position as fraction of tickSpacing
+  // World-units per second the partner pattern drifts past the primary
+  // pattern. Independent of cameraX, so even paused the partners scroll
+  // at their own pace, giving the "second rhythm" feel rather than a
+  // locked sub-multiple of the primary ticks. 0 = locked (back-compat).
+  tickPartnerDrift: 0,
+  // Per-rail seconds-to-sync: when > 0, the partner ramp decays from full
+  // amplitude to 0 over N seconds starting when the rail spawns this loop
+  // iteration. Sells the "blue rail = CPU restored to normal" story —
+  // dense ticks at spawn relax back to primary spacing. 0 = no decay
+  // (stays loud forever; used for the red "overload" rail).
+  laneTickPartnerSync: new Array(MAX_LANE_BUCKETS).fill(0),
+  // Per-rail end-sync (segments): when > 0, partner amplitude decays from
+  // full to 0 over the last N segments of the rail's life so the rail
+  // terminates with primary tick spacing rather than dense overload.
+  // Independent of start sync — red can stay loud through its life and
+  // still resolve back to primary right before it ends.
+  laneTickPartnerEndSync: new Array(MAX_LANE_BUCKETS).fill(0),
 
   // ── Ink traps — periodic asymmetric hills along each rail ────────────
   // Per-rail random pattern (hash of segment idx × lane Y). Each trap
@@ -537,6 +561,73 @@ function recomputePhaseRange() {
 }
 recomputePhaseRange();
 
+// Per-rail "tick partner sync" state — tracks when each rail most
+// recently appeared (= the start of its current loop iteration). The
+// shader fades the partner amplitude to 0 over CONFIG.laneTickPartnerSync
+// seconds from that moment, so the "blue rail = CPU restored" story
+// reads as dense ticks at spawn relaxing back to primary spacing.
+const railLastSpawnTime    = new Float32Array(MAX_LANE_BUCKETS).fill(-1);
+const railWasActiveLast    = new Array(MAX_LANE_BUCKETS).fill(false);
+// Per-rail life range in segments — populated by pushPhaseRangeY and
+// read by updateRailTickPartnerDecay so end-sync can fade the partner
+// over the last N segments before the rail terminates.
+const railFirstActiveSeg   = new Int32Array(MAX_LANE_BUCKETS).fill(-1);
+const railLastActiveSeg    = new Int32Array(MAX_LANE_BUCKETS).fill(-1);
+function updateRailTickPartnerDecay() {
+  const segW    = CONFIG.segW | 0;
+  const loopSegs = CONFIG.loopSegs | 0;
+  if (segW <= 0) return;
+  const loopLen = segW * loopSegs;
+  const wxMod   = (loopLen > 0)
+    ? (((WORLD.cameraX % loopLen) + loopLen) % loopLen)
+    : Math.max(0, WORLD.cameraX);
+  const currentSeg = Math.floor(wxMod / segW);
+  const uTimeVal   = mat.uniforms.uTime.value;
+  const conns      = (SIM && SIM.connectionsAt) ? SIM.connectionsAt(currentSeg) : [];
+  const isActiveAt = new Array(MAX_LANE_BUCKETS).fill(false);
+  for (const c of conns) {
+    const rid = (c.rid != null) ? c.rid : c.id;
+    if (rid >= 0 && rid < MAX_LANE_BUCKETS) isActiveAt[rid] = true;
+  }
+  // Stamp lastSpawnTime on the inactive → active transition (= the
+  // moment the camera entered this rail's life in the current loop).
+  for (let rid = 0; rid < MAX_LANE_BUCKETS; rid++) {
+    if (isActiveAt[rid] && !railWasActiveLast[rid]) {
+      railLastSpawnTime[rid] = uTimeVal;
+    }
+    railWasActiveLast[rid] = isActiveAt[rid];
+  }
+  // Compute decay = startDecay × endDecay per rail.
+  //   startDecay: time-based, ramps 1→0 over CONFIG.laneTickPartnerSync
+  //     seconds from the moment the rail spawned this loop.
+  //   endDecay:   position-based, ramps 1→0 over the last
+  //     CONFIG.laneTickPartnerEndSync segments of the rail's life.
+  // Both can be active simultaneously — start sells "blue restored", end
+  // sells "red wraps up before terminating".
+  const syncArr     = Array.isArray(CONFIG.laneTickPartnerSync) ? CONFIG.laneTickPartnerSync : [];
+  const endSyncArr  = Array.isArray(CONFIG.laneTickPartnerEndSync) ? CONFIG.laneTickPartnerEndSync : [];
+  const decayUniform = mat.uniforms.uLaneTickPartnerDecay.value;
+  for (let rid = 0; rid < MAX_LANE_BUCKETS; rid++) {
+    let d = 1.0;
+    const sync  = Number(syncArr[rid]) || 0;
+    const spawn = railLastSpawnTime[rid];
+    if (sync > 0 && spawn >= 0) {
+      const dt = Math.max(0, uTimeVal - spawn);
+      d *= Math.max(0, 1 - dt / sync);
+    }
+    const endSync = Number(endSyncArr[rid]) || 0;
+    const lastSeg = railLastActiveSeg[rid];
+    if (endSync > 0 && lastSeg >= 0 && railWasActiveLast[rid]) {
+      // Segs remaining until the rail terminates this loop iteration.
+      const segsUntilEnd = (lastSeg + 1) - (wxMod / segW);
+      if (segsUntilEnd < endSync) {
+        d *= Math.max(0, Math.min(1, segsUntilEnd / endSync));
+      }
+    }
+    decayUniform[rid] = d;
+  }
+}
+
 function rebuildLaneData() {
   const segW = CONFIG.segW;
   const cameraSeg = Math.floor(WORLD.cameraX / segW);
@@ -628,6 +719,10 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uTickWidth:   { value: CONFIG.tickWidth },
     uTickColor:   { value: new THREE.Color(CONFIG.tickColor || '#F1EFE8') },
     uTickMotionBlur: { value: CONFIG.tickMotionBlur ?? 0 },
+    uLaneTickPartnerAmount: { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uTickPartnerOffset:     { value: CONFIG.tickPartnerOffset ?? 0.18 },
+    uTickPartnerDrift:      { value: CONFIG.tickPartnerDrift ?? 0 },
+    uLaneTickPartnerDecay:  { value: new Float32Array(MAX_LANE_BUCKETS).fill(1.0) },
 
     // Ink traps
     uInkTrapAmount:    { value: CONFIG.inkTrapAmount },
@@ -806,6 +901,10 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uniform float uTickAmount;
     uniform float uTickSpacing;
     uniform float uTickWidth;
+    uniform float uLaneTickPartnerAmount[9];
+    uniform float uTickPartnerOffset;
+    uniform float uTickPartnerDrift;
+    uniform float uLaneTickPartnerDecay[9];
     uniform vec3  uTickColor;
     uniform float uTickMotionBlur;
 
@@ -1220,6 +1319,10 @@ const mat = window.__mat = new THREE.ShaderMaterial({
       // — used by the tick painter so uTickColor only shows up where rails
       // were drawn, not across the full background.
       float rawMaxA = 0.0;
+      // Max partner-tick coverage across rails at this fragment — painted
+      // as uTickColor after the rails composite so partner ticks read the
+      // same colour as primaries.
+      float partnerMaxA = 0.0;
       // Container hull coverage accumulated across every rail this
       // fragment touches. Composited BEHIND the rails so the hull
       // shows up as a saturated halo on the outer edges only.
@@ -1275,6 +1378,48 @@ const mat = window.__mat = new THREE.ShaderMaterial({
           float y2 = conn.b;
           float t  = (wx - sx) / uSegW;
           if (t < 0.0 || t >= 1.0) continue;
+
+          // ── Body-alpha fade windows (applied to every rail) ─────────────
+          // Per-rail start/end alpha ramps, independent of halo amount —
+          // a rail with no halo still needs a soft dissolve at spawn and
+          // termination so it doesn't pop in/out abruptly. Computed once
+          // here per-fragment-per-rail, then multiplied into alpha after
+          // both figma/gauss profile branches.
+          float startAlphaFade = 1.0;
+          float endAlphaFade   = 1.0;
+          {
+            float sfStartWX = uRailHaloStartFadeStartWX[0];
+            float sfEndWX   = uRailHaloStartFadeEndWX[0];
+            float efStartWX = uRailHaloEndFadeStartWX[0];
+            float efEndWX   = uRailHaloEndFadeEndWX[0];
+            float sAEn      = uRailStartAlphaEnabled[0];
+            float eAEn      = uRailEndAlphaEnabled[0];
+            for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+              if (k == rid) {
+                sfStartWX = uRailHaloStartFadeStartWX[k];
+                sfEndWX   = uRailHaloStartFadeEndWX[k];
+                efStartWX = uRailHaloEndFadeStartWX[k];
+                efEndWX   = uRailHaloEndFadeEndWX[k];
+                sAEn      = uRailStartAlphaEnabled[k];
+                eAEn      = uRailEndAlphaEnabled[k];
+                break;
+              }
+            }
+            if (uLoopLen > 0.5) {
+              float wxModFade = mod(wx, uLoopLen);
+              if (sfEndWX > sfStartWX + 0.5 && sAEn > 0.5) {
+                if (wxModFade < sfStartWX) {
+                  startAlphaFade = 0.0;
+                } else if (wxModFade <= sfEndWX) {
+                  startAlphaFade = smoothstep(sfStartWX, sfEndWX, wxModFade);
+                }
+              }
+              if (efEndWX > efStartWX + 0.5 && eAEn > 0.5 &&
+                  wxModFade >= efStartWX && wxModFade <= efEndWX) {
+                endAlphaFade = 1.0 - smoothstep(efStartWX, efEndWX, wxModFade);
+              }
+            }
+          }
 
           // Per-rail phase override: local copies so each rail in this
           // seg computes its own phase from its own y1/y2, without
@@ -1564,14 +1709,15 @@ const mat = window.__mat = new THREE.ShaderMaterial({
               if (uLoopLen > 0.5) {
                 // wx is unbounded; uRailHalo*WX are loop-local. Wrap.
                 float wxMod = mod(wx, uLoopLen);
-                // Start side: full blur across parked, tapering through bend.
-                // Modulated by phaseFalloff so it dies off naturally when
-                // the rail moves far from the trunk during the bend.
+                // Start side: full blur from startWX to taperStartWX,
+                // then ramp down to 0 by endWX. The window itself already
+                // encodes the "parked near trunk → bending away" geometry,
+                // so no extra phase-falloff gating is needed.
                 if (endWX > startWX + 0.5 && wxMod >= startWX && wxMod <= endWX) {
                   float startLen;
                   if (wxMod <= taperStartWX) startLen = 1.0;
                   else startLen = 1.0 - smoothstep(taperStartWX, endWX, wxMod);
-                  startSide = startLen * phaseFalloff;
+                  startSide = startLen;
                 }
                 // End side: blur ramps back up as the rail's life ends.
                 // NOT gated by phaseFalloff — the rail terminates at its
@@ -1583,45 +1729,9 @@ const mat = window.__mat = new THREE.ShaderMaterial({
                 }
               }
               float blurStrength = laneHalo * max(startSide, endSide);
-              // Alpha fade windows — independent of the Gaussian blur
-              // dilution. The blur softens the centre, but the rail
-              // still has finite opacity at its spawn/termination
-              // boundaries; without these multipliers the rail would
-              // appear and disappear abruptly. The start fade ramps
-              // alpha 0 → 1 (rail emerges from the bg); the end fade
-              // drops 1 → 0 (rail dissolves into the bg).
-              float startAlphaFade = 1.0;
-              float endAlphaFade   = 1.0;
-              if (uLoopLen > 0.5) {
-                float wxMod2 = mod(wx, uLoopLen);
-                // Per-rail alpha-fade enable. When the preset's
-                // railMerge.startMode is "colour-blend" (no alpha), this
-                // flag is 0 and the rail keeps full opacity through the
-                // start window — letting the colour-merge tint do the
-                // emergence alone.
-                float startAlphaEn = 1.0;
-                for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
-                  if (k == rid) { startAlphaEn = uRailStartAlphaEnabled[k]; break; }
-                }
-                if (startFadeEndWX > startFadeStartWX + 0.5 && startAlphaEn > 0.5) {
-                  if (wxMod2 < startFadeStartWX) {
-                    startAlphaFade = 0.0;
-                  } else if (wxMod2 <= startFadeEndWX) {
-                    startAlphaFade = smoothstep(startFadeStartWX, startFadeEndWX, wxMod2);
-                  }
-                }
-                // Per-rail end alpha-fade enable. railMerge.endMode =
-                // "colour-blend" disables this so the rail dissolves
-                // purely via colour-tint to pale.
-                float endAlphaEn = 1.0;
-                for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
-                  if (k == rid) { endAlphaEn = uRailEndAlphaEnabled[k]; break; }
-                }
-                if (endFadeEndWX > endFadeStartWX + 0.5 && endAlphaEn > 0.5 &&
-                    wxMod2 >= endFadeStartWX && wxMod2 <= endFadeEndWX) {
-                  endAlphaFade = 1.0 - smoothstep(endFadeStartWX, endFadeEndWX, wxMod2);
-                }
-              }
+              // Body-alpha start/end fade is computed once at the top of
+              // the rail iteration and applied unconditionally below —
+              // see startAlphaFade / endAlphaFade.
               // Normalized Gaussian: peak ≈ 1/σ so total "ink" under
               // the curve is preserved. This matches what figma's
               // layer blur does to a thin stroke — wider σ means the
@@ -1642,7 +1752,7 @@ const mat = window.__mat = new THREE.ShaderMaterial({
               // full-opacity look in that case.
               float gaussPeak  = min(1.2 / sigW, 1.0);
               float gaussAlpha = gaussPeak * exp(-duSq / (2.0 * sigW * sigW));
-              alpha   = mix(pA, gaussAlpha, blurStrength) * clamp(uRailOpacity, 0.0, 1.0) * startAlphaFade * endAlphaFade;
+              alpha   = mix(pA, gaussAlpha, blurStrength) * clamp(uRailOpacity, 0.0, 1.0);
               fragCol = mix(figmaCol, ridSat, blurStrength);
             }
           } else {
@@ -1660,12 +1770,71 @@ const mat = window.__mat = new THREE.ShaderMaterial({
           if (rid != 0 && uConvergenceMode > 0.5 && uMergeAlphaFade > 0.0) {
             alpha *= 1.0 - clamp(uMergeAlphaFade * mix(rPhaseSoftStart, rPhaseSoftEnd, t), 0.0, 1.0);
           }
-          // Save raw alpha (before tick gap) so the tick painter can mask
-          // its colour to "where the rail would have been", and only then
-          // apply the gap to the rail's composited alpha.
+          // Unified body-alpha fade (applies to every rail, with or
+          // without halo). The values are computed at the top of this
+          // rail iteration from the per-rail start/end fade windows.
+          alpha *= startAlphaFade * endAlphaFade;
+          // Per-rail tick density boost — when a rail branches away from
+          // the trunk it gets MORE ticks at the same full brightness as
+          // primaries, communicating "more traffic." Density scales with
+          // proximity to branched position so the effect ramps in as the
+          // rail bends out and fades as it returns. Implemented as a
+          // shrinking effective tick spacing: trunk-Y → uTickSpacing,
+          // fully branched → uTickSpacing / (1 + amount * MAX_EXTRA).
+          float partnerAmt = 0.0;
+          float partnerDecay = 1.0;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) {
+              partnerAmt   = uLaneTickPartnerAmount[k];
+              partnerDecay = uLaneTickPartnerDecay[k];
+              break;
+            }
+          }
+          // Decay scales the partner OPACITY (applied to partnerInside
+          // below), not the density — so partner positions stay locked
+          // to the rail's full-amount sub-multiple of the primary rhythm
+          // and fade in place rather than sliding as decay ramps.
+          float partnerInside = 0.0;
+          if (partnerAmt > 1e-4 && uTickAmount > 1e-4) {
+            // Constant density along the rail's full life — no geometric
+            // ramp, so the bend zone shows the same tick spacing as the
+            // parked range. Per-rail decay (sync) is what turns the
+            // partners off over time for the "blue = restored" story.
+            float extra = partnerAmt * 4.0;   // 0 → 4 extra ticks per primary interval at full
+            if (extra > 1e-4) {
+              float sp     = max(uTickSpacing, 1.0);
+              float spEff  = sp / (1.0 + extra);
+              // Drift the partner pattern past the primary rhythm over
+              // time so partners feel like a second clock rather than a
+              // locked sub-multiple. Time-anchored (independent of
+              // cameraX), so even at speed=0 the partners scroll.
+              float u      = (wx + uTime * uTickPartnerDrift) / spEff;
+              float frac   = u - floor(u);
+              float dist   = min(frac, 1.0 - frac) * spEff;
+              float halfW  = max(uTickWidth, 0.0) * 0.5
+                           + uMotionStep * 0.5 * clamp(uTickMotionBlur, 0.0, 1.0);
+              float aaT    = max(fwidth(wx), 1e-4);
+              partnerInside = 1.0 - smoothstep(halfW - aaT, halfW + aaT, dist);
+            }
+          }
+          // Apply the sync decay AFTER positions are locked, so the
+          // partner ticks fade in opacity rather than re-spacing as
+          // decay changes.
+          partnerInside *= partnerDecay;
+          // Body alpha BEFORE any tick gap — used to weight both the
+          // primary and partner tick painters so the painted colour
+          // tracks rail coverage. Save before subtracting the partner
+          // gap so the painter sees the rail at its un-gapped opacity.
           float rawA = alpha;
+          // Partner gap on this rail's alpha (full-brightness, identical
+          // depth to the primary tick gap).
+          alpha *= 1.0 - partnerInside * uTickAmount;
           alpha *= gap;
           if (rawA > rawMaxA) rawMaxA = rawA;
+          // Track max partner coverage × rail alpha so the partner painter
+          // mixes uTickColor at the same brightness across rails.
+          float partnerCov = partnerInside * rawA;
+          if (partnerCov > partnerMaxA) partnerMaxA = partnerCov;
           if (alpha < 1e-4) continue;
 
           // Constant-index write — WebGL1 needs static indexing into local
@@ -1776,6 +1945,13 @@ const mat = window.__mat = new THREE.ShaderMaterial({
         dst = mix(dst, uTickColor, tickPaint);
         if (tickPaint > maxA) maxA = tickPaint;
       }
+      // Partner ticks: same colour as primaries, masked by the per-rail
+      // partner coverage tracked during the rail loop.
+      if (partnerMaxA > 1e-4) {
+        float partnerPaint = partnerMaxA * uTickAmount;
+        dst = mix(dst, uTickColor, partnerPaint);
+        if (partnerPaint > maxA) maxA = partnerPaint;
+      }
       return vec4(dst, maxA);
     }
 
@@ -1835,6 +2011,56 @@ function updateResolution() {
 }
 window.addEventListener('resize', updateResolution);
 updateResolution();
+
+// Trackpad pan/zoom for inspecting paused frames. Two-finger horizontal
+// scroll pans cameraX; pinch (ctrl+wheel on macOS) zooms toward the cursor.
+// Composes on top of the sim — when speed is non-zero the scene keeps
+// advancing on its own, this just nudges the view.
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect    = canvas.getBoundingClientRect();
+  const aspect  = rect.width / rect.height;
+  // Normalise line-mode wheels (mouse wheels) to pixel-ish deltas.
+  const k       = (e.deltaMode === 1) ? 16 : (e.deltaMode === 2 ? rect.height : 1);
+  const dx      = e.deltaX * k;
+  const dy      = e.deltaY * k;
+
+  if (e.ctrlKey) {
+    // Pinch zoom: anchor on cursor so the world point under the pointer
+    // stays put across the zoom step.
+    const uvx          = (e.clientX - rect.left) / rect.width;
+    const viewWBefore  = (1000 / Math.max(CONFIG.viewZoom, 1e-6)) * aspect;
+    const wxAtCursor   = WORLD.cameraX + (uvx - 0.5) * viewWBefore;
+    const factor       = Math.exp(-dy * 0.01); // pinch open (dy<0) → zoom in
+    const newZoom      = Math.min(2, Math.max(0.05, CONFIG.viewZoom * factor));
+    CONFIG.viewZoom    = newZoom;
+    mat.uniforms.uZoom.value = newZoom;
+    const viewWAfter   = (1000 / newZoom) * aspect;
+    WORLD.cameraX      = wxAtCursor - (uvx - 0.5) * viewWAfter;
+    // Mirror the change into the Zoom slider + readout.
+    const inp = document.querySelector('#panel input[data-k="viewZoom"]');
+    if (inp) inp.value = newZoom;
+    const out = document.querySelector('#panel [data-v="viewZoom"]');
+    if (out) {
+      if (out.tagName === 'INPUT') out.value = newZoom;
+      else out.textContent = newZoom.toFixed(2);
+    }
+  } else {
+    // Pan: convert pixel delta to world units at the current zoom.
+    const viewW      = (1000 / Math.max(CONFIG.viewZoom, 1e-6)) * aspect;
+    const worldPerPx = viewW / rect.width;
+    WORLD.cameraX   += dx * worldPerPx;
+  }
+
+  // Keep cameraX inside the loop window so it matches the running-sim path.
+  const segW     = CONFIG.segW | 0;
+  const loopSegs = CONFIG.loopSegs | 0;
+  if (segW > 0 && loopSegs > 0) {
+    const loopLen = segW * loopSegs;
+    WORLD.cameraX = ((WORLD.cameraX % loopLen) + loopLen) % loopLen;
+  }
+  mat.uniforms.uCameraX.value = WORLD.cameraX;
+}, { passive: false });
 
 // ── Modulators — generic LFO automation for any allowlisted CONFIG key.
 // Each entry runs a wave shape over `cycle` seconds, computes
@@ -2141,6 +2367,7 @@ function tick(timestamp) {
   // motion-blur slider — uses the actual snapped step, not the desired
   // one, so the motion blur matches what was rendered.
   mat.uniforms.uMotionStep.value  = Math.abs(snappedStep);
+  updateRailTickPartnerDecay();
 
   renderer.render(scene, camera);
   // Throttled minimap playhead update (~10 Hz).
@@ -2468,6 +2695,8 @@ function pushPhaseRangeY() {
     startColEnArr[i]   = 1;
     endAlphaEnArr[i]   = 1;
     endColEnArr[i]     = 1;
+    railFirstActiveSeg[i] = -1;
+    railLastActiveSeg[i]  = -1;
   }
   const railMergeCfg = (CONFIG.railMerge && typeof CONFIG.railMerge === 'object') ? CONFIG.railMerge : {};
   if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
@@ -2477,9 +2706,10 @@ function pushPhaseRangeY() {
     const haloAmounts = Array.isArray(CONFIG.laneHaloAmount) ? CONFIG.laneHaloAmount : [];
     const endFadeSegs = 2;        // for "fuller" rails (red): short end-fade
     const subtleEndFadeSegs = 6;  // for "subtle" rails (blue): longer end-fade — gives the dissolve time to play out while blue sits on top of the trunk after merging
+    const MIN_END_FADE_SEGS = 4;  // floor for the auto end-fade so non-halo rails never cut off abruptly
     for (let rid = 0; rid < MAX_LANE_BUCKETS; rid++) {
       const amt = Number(haloAmounts[rid]) || 0;
-      if (!(amt > 0.0001)) continue;
+      const hasHalo = amt > 0.0001;
       // Per-rail overrides from the preset's railMerge block (if any).
       // Look up by string key (JSON object keys are strings).
       const rm = railMergeCfg[String(rid)] || railMergeCfg[rid] || {};
@@ -2512,17 +2742,37 @@ function pushPhaseRangeY() {
           if (parkEndSeg >= 0 && bendEndSeg < 0) bendEndSeg = s;
         }
       }
-      if (parkStartSeg >= 0) {
-        if (parkEndSeg < 0) parkEndSeg = loopLen;
-        if (bendEndSeg < 0) bendEndSeg = parkEndSeg + 1;
-        startArr[rid] = parkStartSeg * segW;
-        taperArr[rid] = parkEndSeg   * segW;
-        endArr[rid]   = bendEndSeg   * segW;
+      // Skip rails that never appear in the sim — no fade windows needed.
+      if (firstActiveSeg < 0) continue;
+      railFirstActiveSeg[rid] = firstActiveSeg;
+      railLastActiveSeg[rid]  = lastActiveSeg;
+      // Halo-blur window — only meaningful when the rail actually has halo.
+      // Body-alpha fade windows below are computed for every rail so a
+      // rail with no halo still dissolves gracefully instead of cutting
+      // off abruptly.
+      if (hasHalo) {
+        if (parkStartSeg >= 0) {
+          if (parkEndSeg < 0) parkEndSeg = loopLen;
+          if (bendEndSeg < 0) bendEndSeg = parkEndSeg + 1;
+          startArr[rid] = parkStartSeg * segW;
+          taperArr[rid] = parkEndSeg   * segW;
+          endArr[rid]   = bendEndSeg   * segW;
+        } else if (lastActiveSeg >= firstActiveSeg) {
+          // No near-trunk park detected (rail spawns straight at a branched
+          // position, e.g. v1's SPLIT/MERGE pairs). Fall back to a full-life
+          // window with no taper so halo blur applies uniformly across the
+          // rail's branched run.
+          startArr[rid] = firstActiveSeg     * segW;
+          taperArr[rid] = (lastActiveSeg + 1) * segW;
+          endArr[rid]   = (lastActiveSeg + 1) * segW;
+        }
       }
-      // Classify rail: "subtle" rails (low halo amount, e.g. blue=0.25)
+      // Classify rail: "subtle" rails (low or no halo, e.g. blue=0.25)
       // get extended fade windows on both ends. "Fuller" rails (red=1.0)
-      // keep short fades.
-      const subtle = amt < 0.5;
+      // keep short fades. Rails with no halo at all default to subtle so
+      // their body-alpha dissolve is long enough to read as a fade rather
+      // than a hard edge.
+      const subtle = !hasHalo || amt < 0.5;
       // Start-fade: ramp alpha 0 → 1 across the rail's emergence.
       // "Subtle" rails get a fade window that STARTS one segment after
       // spawn (so the rail is invisible at its spawn point AND in the
@@ -2568,29 +2818,31 @@ function pushPhaseRangeY() {
       // use a shorter fade.
       if (lastActiveSeg >= 0 && lastActiveSeg < loopLen - 1) {
         const railEndSeg = lastActiveSeg + 1;
-        // Preset overrides win; otherwise use the auto-detected defaults.
-        const segsForEnd = Number.isFinite(rm.endFadeSegs) && rm.endFadeSegs > 0
-                            ? rm.endFadeSegs
-                            : (subtle ? subtleEndFadeSegs : endFadeSegs);
         const preBendLead = Number.isFinite(rm.preBendLead) && rm.preBendLead >= 0
                             ? rm.preBendLead
                             : 2;
-        // Anchor: for subtle rails with an END bend, start `preBendLead`
-        // segs before the bend; otherwise count back from rail's end.
-        let fadeStartSeg;
-        if (subtle && endBendStartSeg >= 0 && endBendStartSeg > (bendEndSeg >= 0 ? bendEndSeg : 0)) {
-          fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, endBendStartSeg - preBendLead);
-        } else {
-          fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, railEndSeg - segsForEnd);
-        }
-        // Window LENGTH = endFadeSegs (if explicit) or pinned to railEnd.
-        // Letting the preset cap the window means `endFadeSegs: 10` truly
-        // gives a 10-seg dissolve regardless of how late the rail lives.
-        let fadeEndSeg;
+        let fadeStartSeg, fadeEndSeg;
         if (Number.isFinite(rm.endFadeSegs) && rm.endFadeSegs > 0) {
-          fadeEndSeg = Math.min(railEndSeg, fadeStartSeg + rm.endFadeSegs);
+          // Explicit override: a fade of exactly N segs ending at the rail's
+          // termination. Wins over the bend-anchored auto path so inspector
+          // tweaks always do what the user expects.
+          fadeEndSeg   = railEndSeg;
+          fadeStartSeg = Math.max(0, railEndSeg - rm.endFadeSegs);
         } else {
+          // Auto: subtle rails with an END bend anchor `preBendLead` segs
+          // before the bend; everyone else counts back from rail's end.
+          const segsForEnd = subtle ? subtleEndFadeSegs : endFadeSegs;
+          if (subtle && endBendStartSeg >= 0 && endBendStartSeg > (bendEndSeg >= 0 ? bendEndSeg : 0)) {
+            fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, endBendStartSeg - preBendLead);
+          } else {
+            fadeStartSeg = Math.max(bendEndSeg >= 0 ? bendEndSeg : 0, railEndSeg - segsForEnd);
+          }
           fadeEndSeg = railEndSeg;
+          // Minimum-length end-fade so the auto path never collapses to a
+          // ~2-seg window (= the visible abrupt-stop bug on non-halo rails).
+          if (fadeEndSeg - fadeStartSeg < MIN_END_FADE_SEGS) {
+            fadeStartSeg = Math.max(0, fadeEndSeg - MIN_END_FADE_SEGS);
+          }
         }
         if (fadeEndSeg > fadeStartSeg) {
           endFadeStArr[rid] = fadeStartSeg * segW;
@@ -2674,6 +2926,14 @@ function _applyConfigCore(skipMinimap) {
   mat.uniforms.uTickWidth.value   = CONFIG.tickWidth;
   mat.uniforms.uTickColor.value.set(CONFIG.tickColor || '#F1EFE8');
   mat.uniforms.uTickMotionBlur.value = CONFIG.tickMotionBlur ?? 0;
+  const ltp = Array.isArray(CONFIG.laneTickPartnerAmount) ? CONFIG.laneTickPartnerAmount : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    mat.uniforms.uLaneTickPartnerAmount.value[i] = Number(ltp[i]) || 0;
+  }
+  mat.uniforms.uTickPartnerOffset.value = (typeof CONFIG.tickPartnerOffset === 'number')
+    ? CONFIG.tickPartnerOffset : 0.18;
+  mat.uniforms.uTickPartnerDrift.value = (typeof CONFIG.tickPartnerDrift === 'number')
+    ? CONFIG.tickPartnerDrift : 0;
 
   mat.uniforms.uInkTrapAmount.value    = CONFIG.inkTrapAmount;
   mat.uniforms.uInkTrapSpacing.value   = CONFIG.inkTrapSpacing;
@@ -2883,6 +3143,23 @@ function renderRailInspector() {
     <label>Amount <input type="range" min="0" max="1" step="0.01" data-rik="amount" value="${amt}"><span data-riv="amount">${amt.toFixed(2)}</span></label>
     <label>Sigma <input type="range" min="0.05" max="6" step="0.05" data-rik="sigma" value="${sig}"><span data-riv="sigma">${sig.toFixed(2)}</span></label>
 
+    <div class="sub-head sub-block">Tick partner</div>
+    <label>Amount
+      <input type="range" min="0" max="1" step="0.01" data-rik="tickPartnerAmount"
+             value="${(CONFIG.laneTickPartnerAmount && CONFIG.laneTickPartnerAmount[rid]) || 0}">
+      <span data-riv="tickPartnerAmount">${((CONFIG.laneTickPartnerAmount && CONFIG.laneTickPartnerAmount[rid]) || 0).toFixed(2)}</span>
+    </label>
+    <label>Sync (sec)
+      <input type="range" min="0" max="5" step="0.1" data-rik="tickPartnerSync"
+             value="${(CONFIG.laneTickPartnerSync && CONFIG.laneTickPartnerSync[rid]) || 0}">
+      <span data-riv="tickPartnerSync">${((CONFIG.laneTickPartnerSync && CONFIG.laneTickPartnerSync[rid]) || 0).toFixed(1)}</span>
+    </label>
+    <label>End sync (segs)
+      <input type="range" min="0" max="20" step="1" data-rik="tickPartnerEndSync"
+             value="${(CONFIG.laneTickPartnerEndSync && CONFIG.laneTickPartnerEndSync[rid]) || 0}">
+      <span data-riv="tickPartnerEndSync">${((CONFIG.laneTickPartnerEndSync && CONFIG.laneTickPartnerEndSync[rid]) || 0)}</span>
+    </label>
+
     <div class="sub-head sub-block">Start fade</div>
     <label>Length (auto ${autoStartFadeSegs})
       <input type="range" min="0" max="20" step="1" data-rik="startFadeSegs"
@@ -2929,6 +3206,24 @@ function renderRailInspector() {
         const arr = key === 'amount' ? CONFIG.laneHaloAmount : CONFIG.laneHaloSigma;
         if (Array.isArray(arr)) arr[rid] = parseFloat(v);
         if (valSpan) valSpan.textContent = parseFloat(v).toFixed(2);
+      } else if (key === 'tickPartnerAmount') {
+        if (!Array.isArray(CONFIG.laneTickPartnerAmount)) {
+          CONFIG.laneTickPartnerAmount = new Array(MAX_LANE_BUCKETS).fill(0);
+        }
+        CONFIG.laneTickPartnerAmount[rid] = parseFloat(v);
+        if (valSpan) valSpan.textContent = parseFloat(v).toFixed(2);
+      } else if (key === 'tickPartnerSync') {
+        if (!Array.isArray(CONFIG.laneTickPartnerSync)) {
+          CONFIG.laneTickPartnerSync = new Array(MAX_LANE_BUCKETS).fill(0);
+        }
+        CONFIG.laneTickPartnerSync[rid] = parseFloat(v);
+        if (valSpan) valSpan.textContent = parseFloat(v).toFixed(1);
+      } else if (key === 'tickPartnerEndSync') {
+        if (!Array.isArray(CONFIG.laneTickPartnerEndSync)) {
+          CONFIG.laneTickPartnerEndSync = new Array(MAX_LANE_BUCKETS).fill(0);
+        }
+        CONFIG.laneTickPartnerEndSync[rid] = parseInt(v, 10);
+        if (valSpan) valSpan.textContent = String(parseInt(v, 10));
       } else if (key === 'startFadeSegs' || key === 'endFadeSegs' || key === 'preBendLead') {
         const n = parseInt(v, 10);
         const rm2 = railMergeFor(rid);
