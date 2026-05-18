@@ -113,6 +113,11 @@ const CONFIG = {
   // on every rail by default → no effect, presets keep their look.
   laneTickPartnerAmount: new Array(MAX_LANE_BUCKETS).fill(0),
   tickPartnerOffset: 0.18,   // partner position as fraction of tickSpacing
+  // Total ticks per primary interval = density. 5 means 4 extra partner
+  // ticks between primaries; 2 means a single partner halfway. Locked
+  // statically so animating laneTickPartnerAmount changes only opacity,
+  // not position — no moiré beat / no visible "speed up" during fades.
+  tickPartnerDensity: 5,
   // World-units per second the partner pattern drifts past the primary
   // pattern. Independent of cameraX, so even paused the partners scroll
   // at their own pace, giving the "second rhythm" feel rather than a
@@ -130,6 +135,21 @@ const CONFIG = {
   // Independent of start sync — red can stay loud through its life and
   // still resolve back to primary right before it ends.
   laneTickPartnerEndSync: new Array(MAX_LANE_BUCKETS).fill(0),
+  // ── Tick partner channel B (third tick layer) ────────────────────────
+  // Independent partner pattern with its own density, drift, amount, and
+  // DC offset. Same architecture / animation semantics as the first
+  // partner channel, but its drift is animated separately so the third
+  // layer can move at its own rhythm.
+  laneTickPartner2Amount: new Array(MAX_LANE_BUCKETS).fill(0),
+  tickPartner2Density:    1,
+  tickPartner2Drift:      0,
+  tickPartner2Offset:     0.5,   // DC offset from primary positions, as fraction of tickSpacing
+  // Per-rail overrides surfaced in the inspector. Each falls back to the
+  // global value when its sentinel is set (0 for width, -1 for opacity
+  // and profile) so existing presets keep their look.
+  laneRailWidths:    new Array(MAX_LANE_BUCKETS).fill(0),    // 0 = use CONFIG.railWidth
+  laneRailOpacities: new Array(MAX_LANE_BUCKETS).fill(-1),   // -1 = use CONFIG.railOpacity
+  laneRailProfiles:  new Array(MAX_LANE_BUCKETS).fill(-1),   // -1 = use CONFIG.railProfile, 0 = gaussian, 1 = figma
 
   // ── Ink traps — periodic asymmetric hills along each rail ────────────
   // Per-rail random pattern (hash of segment idx × lane Y). Each trap
@@ -460,6 +480,13 @@ const WORLD = {
   // that turn, but cap on rails ensures we never exceed MAX_LANE_BUCKETS).
   maxSlots:      MAX_LANE_BUCKETS,
   laneOriginSeg: 0,
+  // Accumulated tick-partner drift (∫ drift × dt). Used instead of
+  // uTime × drift so animating drift via a modulator doesn't cause the
+  // partner pattern to snap — the integral is continuous regardless of
+  // how drift changes.
+  tickPartnerDriftPhase: 0,
+  // Channel B accumulator (parallel to tickPartnerDriftPhase).
+  tickPartner2DriftPhase: 0,
 };
 
 // ── Three.js setup ───────────────────────────────────────────────────────
@@ -722,7 +749,17 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uLaneTickPartnerAmount: { value: new Float32Array(MAX_LANE_BUCKETS) },
     uTickPartnerOffset:     { value: CONFIG.tickPartnerOffset ?? 0.18 },
     uTickPartnerDrift:      { value: CONFIG.tickPartnerDrift ?? 0 },
+    uTickPartnerDriftPhase: { value: 0 },
+    uTickPartnerDensity:    { value: CONFIG.tickPartnerDensity ?? 5 },
     uLaneTickPartnerDecay:  { value: new Float32Array(MAX_LANE_BUCKETS).fill(1.0) },
+    uLaneTickPartner2Amount: { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uTickPartner2Density:    { value: CONFIG.tickPartner2Density ?? 1 },
+    uTickPartner2Drift:      { value: CONFIG.tickPartner2Drift ?? 0 },
+    uTickPartner2DriftPhase: { value: 0 },
+    uTickPartner2Offset:     { value: CONFIG.tickPartner2Offset ?? 0.5 },
+    uLaneRailWidths:        { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uLaneRailOpacities:     { value: new Float32Array(MAX_LANE_BUCKETS).fill(-1) },
+    uLaneRailProfiles:      { value: new Float32Array(MAX_LANE_BUCKETS).fill(-1) },
 
     // Ink traps
     uInkTrapAmount:    { value: CONFIG.inkTrapAmount },
@@ -904,7 +941,17 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uniform float uLaneTickPartnerAmount[9];
     uniform float uTickPartnerOffset;
     uniform float uTickPartnerDrift;
+    uniform float uTickPartnerDriftPhase;
+    uniform float uTickPartnerDensity;
     uniform float uLaneTickPartnerDecay[9];
+    uniform float uLaneTickPartner2Amount[9];
+    uniform float uTickPartner2Density;
+    uniform float uTickPartner2Drift;
+    uniform float uTickPartner2DriftPhase;
+    uniform float uTickPartner2Offset;
+    uniform float uLaneRailWidths[9];
+    uniform float uLaneRailOpacities[9];
+    uniform float uLaneRailProfiles[9];
     uniform vec3  uTickColor;
     uniform float uTickMotionBlur;
 
@@ -1464,8 +1511,20 @@ const mat = window.__mat = new THREE.ShaderMaterial({
               break;
             }
           }
-          float bodyHalfW = (rid != 0) ? baseHalfW * max(widthScale, 0.01)
-                                       : baseHalfW;
+          // Per-rail width override (works on trunk too). 0 = use the
+          // baseHalfW-derived value (= global * widthScale for branches,
+          // = global for trunk), >0 = absolute half-width in world units.
+          float ridWidth = 0.0;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) { ridWidth = uLaneRailWidths[k]; break; }
+          }
+          float bodyHalfW;
+          if (ridWidth > 0.0001) {
+            bodyHalfW = ridWidth;
+          } else {
+            bodyHalfW = (rid != 0) ? baseHalfW * max(widthScale, 0.01)
+                                   : baseHalfW;
+          }
           float halfW = bodyHalfW;
           if (uConvergenceMode > 0.5 && uConvergenceTaper > 0.0) {
             // Width follows the loop phase: full width during spread
@@ -1654,15 +1713,29 @@ const mat = window.__mat = new THREE.ShaderMaterial({
             ridShl = mix(ridShl, mix(uBurstColor, ridShl, 0.4),  bA);
           }
 
+          // Per-rail opacity & profile overrides: -1 falls through to
+          // the global value, otherwise this rail's override wins.
+          float ridOpacity = -1.0;
+          float ridProfile = -1.0;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) {
+              ridOpacity = uLaneRailOpacities[k];
+              ridProfile = uLaneRailProfiles[k];
+              break;
+            }
+          }
+          float opVal      = (ridOpacity >= 0.0) ? ridOpacity : uRailOpacity;
+          float profileVal = (ridProfile >= 0.0) ? ridProfile : uRailProfile;
+
           float alpha;
           vec3  fragCol;
-          if (uRailProfile > 0.5) {
+          if (profileVal > 0.5) {
             // Figma profile — body itself has soft edges. du = 0 at the
             // rail center, du = 1 at the body's outer edge.
             float du   = abs(dY) / max(hHalfT, 1e-4);
             float pA   = figmaProfileAlphaWithShoulder(du, shoulderOpacity);
             vec3  figmaCol = figmaProfileColor(du, ridSat, ridShl, ridEdge);
-            alpha    = pA * clamp(uRailOpacity, 0.0, 1.0);
+            alpha    = pA * clamp(opVal, 0.0, 1.0);
             fragCol  = figmaCol;
             // Per-rail progressive blur — when laneHaloAmount > 0, the
             // rail's profile blends from figma (sharp body) to a wide
@@ -1752,7 +1825,7 @@ const mat = window.__mat = new THREE.ShaderMaterial({
               // full-opacity look in that case.
               float gaussPeak  = min(1.2 / sigW, 1.0);
               float gaussAlpha = gaussPeak * exp(-duSq / (2.0 * sigW * sigW));
-              alpha   = mix(pA, gaussAlpha, blurStrength) * clamp(uRailOpacity, 0.0, 1.0);
+              alpha   = mix(pA, gaussAlpha, blurStrength) * clamp(opVal, 0.0, 1.0);
               fragCol = mix(figmaCol, ridSat, blurStrength);
             }
           } else {
@@ -1760,7 +1833,7 @@ const mat = window.__mat = new THREE.ShaderMaterial({
             float fillCov = 1.0 - smoothstep(-aa, aa, d);
             float dHalo   = max(d, 0.0) / max(hHalfT, 1e-4);
             float bodyC   = exp(-(dHalo * dHalo) / (2.0 * sig * sig)) * softK;
-            alpha         = max(fillCov, bodyC) * clamp(uRailOpacity, 0.0, 1.0);
+            alpha         = max(fillCov, bodyC) * clamp(opVal, 0.0, 1.0);
             fragCol       = ridSat;
           }
           // Fade non-trunk rails out toward the merge so they "grow out
@@ -1796,31 +1869,52 @@ const mat = window.__mat = new THREE.ShaderMaterial({
           // and fade in place rather than sliding as decay ramps.
           float partnerInside = 0.0;
           if (partnerAmt > 1e-4 && uTickAmount > 1e-4) {
-            // Constant density along the rail's full life — no geometric
-            // ramp, so the bend zone shows the same tick spacing as the
-            // parked range. Per-rail decay (sync) is what turns the
-            // partners off over time for the "blue = restored" story.
-            float extra = partnerAmt * 4.0;   // 0 → 4 extra ticks per primary interval at full
-            if (extra > 1e-4) {
-              float sp     = max(uTickSpacing, 1.0);
-              float spEff  = sp / (1.0 + extra);
-              // Drift the partner pattern past the primary rhythm over
-              // time so partners feel like a second clock rather than a
-              // locked sub-multiple. Time-anchored (independent of
-              // cameraX), so even at speed=0 the partners scroll.
-              float u      = (wx + uTime * uTickPartnerDrift) / spEff;
-              float frac   = u - floor(u);
-              float dist   = min(frac, 1.0 - frac) * spEff;
-              float halfW  = max(uTickWidth, 0.0) * 0.5
-                           + uMotionStep * 0.5 * clamp(uTickMotionBlur, 0.0, 1.0);
-              float aaT    = max(fwidth(wx), 1e-4);
-              partnerInside = 1.0 - smoothstep(halfW - aaT, halfW + aaT, dist);
-            }
+            // partnerAmt drives DENSITY: 0 = same as primary spacing
+            // (in sync), 1 = uTickPartnerDensity × primary spacing
+            // (max out-of-sync). Animating amount makes partners slide
+            // between aligned and offset against primaries — reads as
+            // "going in and out of sync".
+            float maxDensity = max(uTickPartnerDensity, 1.0);
+            float density    = mix(1.0, maxDensity, clamp(partnerAmt, 0.0, 1.0));
+            float sp         = max(uTickSpacing, 1.0);
+            float spEff      = sp / density;
+            float u          = (wx + uTickPartnerDriftPhase) / spEff;
+            float frac       = u - floor(u);
+            float dist       = min(frac, 1.0 - frac) * spEff;
+            float halfW      = max(uTickWidth, 0.0) * 0.5
+                             + uMotionStep * 0.5 * clamp(uTickMotionBlur, 0.0, 1.0);
+            float aaT        = max(fwidth(wx), 1e-4);
+            partnerInside    = 1.0 - smoothstep(halfW - aaT, halfW + aaT, dist);
           }
-          // Apply the sync decay AFTER positions are locked, so the
-          // partner ticks fade in opacity rather than re-spacing as
-          // decay changes.
+          // Apply the sync decay (opacity scaling).
           partnerInside *= partnerDecay;
+          // ── Channel B (third tick layer) ────────────────────────────
+          // Same construction as the first partner channel, but with
+          // independent density, drift, amount, and a DC offset so the
+          // layer sits at a different fraction of tickSpacing.
+          float partner2Amt = 0.0;
+          for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+            if (k == rid) { partner2Amt = uLaneTickPartner2Amount[k]; break; }
+          }
+          float partner2Inside = 0.0;
+          if (partner2Amt > 1e-4 && uTickAmount > 1e-4) {
+            float maxDensity2 = max(uTickPartner2Density, 1.0);
+            float density2    = mix(1.0, maxDensity2, clamp(partner2Amt, 0.0, 1.0));
+            float sp          = max(uTickSpacing, 1.0);
+            float spEff2      = sp / density2;
+            float offsetWX2   = uTickPartner2Offset * sp;
+            float u2          = (wx + uTickPartner2DriftPhase + offsetWX2) / spEff2;
+            float frac2       = u2 - floor(u2);
+            float dist2       = min(frac2, 1.0 - frac2) * spEff2;
+            float halfW2      = max(uTickWidth, 0.0) * 0.5
+                              + uMotionStep * 0.5 * clamp(uTickMotionBlur, 0.0, 1.0);
+            float aaT2        = max(fwidth(wx), 1e-4);
+            partner2Inside    = 1.0 - smoothstep(halfW2 - aaT2, halfW2 + aaT2, dist2);
+          }
+          // Union the two partner layers: the painter and alpha gap both
+          // see the max of the two coverages, so layer B paints in the
+          // same uTickColor as layer A and reads as a single rhythm.
+          partnerInside = max(partnerInside, partner2Inside);
           // Body alpha BEFORE any tick gap — used to weight both the
           // primary and partner tick painters so the painted colour
           // tracks rail coverage. Save before subtracting the partner
@@ -2097,6 +2191,25 @@ const MOD_TARGETS = [
   { key: 'bendSpread',         label: 'Bend spread',   min: 0,    max: 1,     step: 0.01  },
   { key: 'spawnChance',        label: 'Spawn chance',  min: 0,    max: 1,     step: 0.01  },
   { key: 'endChance',          label: 'End chance',    min: 0,    max: 1,     step: 0.01  },
+  { key: 'tickPartnerDrift',   label: 'Partner drift', min: -10000, max: 10000, step: 10  },
+  { key: 'tickPartner2Drift',  label: 'Partner B drift', min: -10000, max: 10000, step: 10 },
+  // Per-rail Tick partner amount. arrayKey + index lets the modulator
+  // write into CONFIG.laneTickPartnerAmount[index] instead of a top-level
+  // scalar — one entry per rail so each rail can be animated independently.
+  ...Array.from({ length: MAX_LANE_BUCKETS }, (_, i) => ({
+    key:      `laneTickPartnerAmount.${i}`,
+    label:    `Tick partner R${i}`,
+    arrayKey: 'laneTickPartnerAmount',
+    index:    i,
+    min: 0, max: 1, step: 0.01,
+  })),
+  ...Array.from({ length: MAX_LANE_BUCKETS }, (_, i) => ({
+    key:      `laneTickPartner2Amount.${i}`,
+    label:    `Tick partner B R${i}`,
+    arrayKey: 'laneTickPartner2Amount',
+    index:    i,
+    min: 0, max: 1, step: 0.01,
+  })),
 ];
 // Each waveform is a "shape function" 0..1 → 0..1 over one cycle. The
 // stepModulator code lerps min..max by the shape's output. The shape
@@ -2220,7 +2333,15 @@ function stepModulators(dt) {
       val = m.min + (m.max - m.min) * v01;
     }
     val = Math.max(tgt.min, Math.min(tgt.max, val));
-    CONFIG[m.target] = val;
+    if (tgt.arrayKey && typeof tgt.index === 'number') {
+      // Array-indexed target — write into CONFIG[arrayKey][index] rather
+      // than overwriting a top-level scalar. Used by per-rail modulator
+      // entries (e.g. Tick partner R0..R8).
+      const arr = CONFIG[tgt.arrayKey];
+      if (Array.isArray(arr)) arr[tgt.index] = val;
+    } else {
+      CONFIG[m.target] = val;
+    }
     touched = true;
   }
   if (touched) {
@@ -2367,6 +2488,16 @@ function tick(timestamp) {
   // motion-blur slider — uses the actual snapped step, not the desired
   // one, so the motion blur matches what was rendered.
   mat.uniforms.uMotionStep.value  = Math.abs(snappedStep);
+  // Integrate tickPartnerDrift over time so the partner phase is
+  // continuous even when drift is animated by a modulator. Using
+  // uTime × drift directly would cause the position to snap on every
+  // drift change (since uTime grows large).
+  const driftNow = (typeof CONFIG.tickPartnerDrift === 'number') ? CONFIG.tickPartnerDrift : 0;
+  WORLD.tickPartnerDriftPhase += driftNow * frameDt;
+  mat.uniforms.uTickPartnerDriftPhase.value = WORLD.tickPartnerDriftPhase;
+  const drift2Now = (typeof CONFIG.tickPartner2Drift === 'number') ? CONFIG.tickPartner2Drift : 0;
+  WORLD.tickPartner2DriftPhase += drift2Now * frameDt;
+  mat.uniforms.uTickPartner2DriftPhase.value = WORLD.tickPartner2DriftPhase;
   updateRailTickPartnerDecay();
 
   renderer.render(scene, camera);
@@ -2436,6 +2567,16 @@ async function exportPngSequence() {
       mat.uniforms.uCameraX.value     = WORLD.cameraX;
       mat.uniforms.uLaneOriginX.value = WORLD.laneOriginSeg * CONFIG.segW;
       mat.uniforms.uMotionStep.value  = Math.abs(CONFIG.speed) * dt;
+      // Integrate tick-partner drift and update per-rail sync decay so the
+      // PNG export captures the same partner animation the live tick() loop
+      // produces (these accumulators don't live inside stepModulators).
+      const driftNow = (typeof CONFIG.tickPartnerDrift === 'number') ? CONFIG.tickPartnerDrift : 0;
+      WORLD.tickPartnerDriftPhase += driftNow * dt;
+      mat.uniforms.uTickPartnerDriftPhase.value = WORLD.tickPartnerDriftPhase;
+      const drift2Now = (typeof CONFIG.tickPartner2Drift === 'number') ? CONFIG.tickPartner2Drift : 0;
+      WORLD.tickPartner2DriftPhase += drift2Now * dt;
+      mat.uniforms.uTickPartner2DriftPhase.value = WORLD.tickPartner2DriftPhase;
+      updateRailTickPartnerDecay();
       renderer.render(scene, camera);
 
       const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
@@ -2934,6 +3075,27 @@ function _applyConfigCore(skipMinimap) {
     ? CONFIG.tickPartnerOffset : 0.18;
   mat.uniforms.uTickPartnerDrift.value = (typeof CONFIG.tickPartnerDrift === 'number')
     ? CONFIG.tickPartnerDrift : 0;
+  mat.uniforms.uTickPartnerDensity.value = (typeof CONFIG.tickPartnerDensity === 'number' && CONFIG.tickPartnerDensity > 0)
+    ? CONFIG.tickPartnerDensity : 5;
+  const lt2 = Array.isArray(CONFIG.laneTickPartner2Amount) ? CONFIG.laneTickPartner2Amount : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    mat.uniforms.uLaneTickPartner2Amount.value[i] = Number(lt2[i]) || 0;
+  }
+  mat.uniforms.uTickPartner2Density.value = (typeof CONFIG.tickPartner2Density === 'number' && CONFIG.tickPartner2Density > 0)
+    ? CONFIG.tickPartner2Density : 1;
+  mat.uniforms.uTickPartner2Drift.value = (typeof CONFIG.tickPartner2Drift === 'number') ? CONFIG.tickPartner2Drift : 0;
+  mat.uniforms.uTickPartner2Offset.value = (typeof CONFIG.tickPartner2Offset === 'number') ? CONFIG.tickPartner2Offset : 0.5;
+  const lwArr = Array.isArray(CONFIG.laneRailWidths)    ? CONFIG.laneRailWidths    : [];
+  const loArr = Array.isArray(CONFIG.laneRailOpacities) ? CONFIG.laneRailOpacities : [];
+  const lpArr = Array.isArray(CONFIG.laneRailProfiles)  ? CONFIG.laneRailProfiles  : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    const wv = Number(lwArr[i]);
+    mat.uniforms.uLaneRailWidths.value[i] = (Number.isFinite(wv) && wv > 0) ? wv : 0;
+    const ov = Number(loArr[i]);
+    mat.uniforms.uLaneRailOpacities.value[i] = (Number.isFinite(ov) && ov >= 0) ? Math.min(1, ov) : -1;
+    const pv = Number(lpArr[i]);
+    mat.uniforms.uLaneRailProfiles.value[i] = (Number.isFinite(pv) && pv >= 0) ? (pv > 0.5 ? 1 : 0) : -1;
+  }
 
   mat.uniforms.uInkTrapAmount.value    = CONFIG.inkTrapAmount;
   mat.uniforms.uInkTrapSpacing.value   = CONFIG.inkTrapSpacing;
@@ -3139,7 +3301,37 @@ function renderRailInspector() {
       <div class="sub-head" style="margin:0; flex:1;">Rail ${rid}</div>
       <button class="preset-btn" id="rail-inspector-close" style="width:auto; margin:0; padding:2px 8px;">×</button>
     </div>
-    <div class="sub-head">Halo</div>
+    <div class="sub-head">Shape</div>
+    <label>Colour
+      <input type="color" data-rik="laneColor" value="${(CONFIG.laneColors && CONFIG.laneColors[rid]) || '#888888'}">
+    </label>
+    <label>Width (global ${CONFIG.railWidth})
+      <input type="range" min="0" max="200" step="1" data-rik="railWidth"
+             value="${(CONFIG.laneRailWidths && CONFIG.laneRailWidths[rid]) || 0}">
+      <span data-riv="railWidth">${
+        (CONFIG.laneRailWidths && CONFIG.laneRailWidths[rid] > 0)
+          ? CONFIG.laneRailWidths[rid]
+          : 'auto'
+      }</span>
+    </label>
+    <label>Opacity (global ${Number(CONFIG.railOpacity).toFixed(2)})
+      <input type="range" min="-0.01" max="1" step="0.01" data-rik="railOpacity"
+             value="${(CONFIG.laneRailOpacities && CONFIG.laneRailOpacities[rid] != null) ? CONFIG.laneRailOpacities[rid] : -0.01}">
+      <span data-riv="railOpacity">${
+        (CONFIG.laneRailOpacities && CONFIG.laneRailOpacities[rid] >= 0)
+          ? Number(CONFIG.laneRailOpacities[rid]).toFixed(2)
+          : 'auto'
+      }</span>
+    </label>
+    <label>Profile
+      <select data-rik="railProfile">
+        <option value="auto"${(!CONFIG.laneRailProfiles || CONFIG.laneRailProfiles[rid] < 0) ? ' selected' : ''}>auto (global)</option>
+        <option value="gaussian"${(CONFIG.laneRailProfiles && CONFIG.laneRailProfiles[rid] === 0) ? ' selected' : ''}>gaussian</option>
+        <option value="figma"${(CONFIG.laneRailProfiles && CONFIG.laneRailProfiles[rid] === 1) ? ' selected' : ''}>figma</option>
+      </select>
+    </label>
+
+    <div class="sub-head sub-block">Halo</div>
     <label>Amount <input type="range" min="0" max="1" step="0.01" data-rik="amount" value="${amt}"><span data-riv="amount">${amt.toFixed(2)}</span></label>
     <label>Sigma <input type="range" min="0.05" max="6" step="0.05" data-rik="sigma" value="${sig}"><span data-riv="sigma">${sig.toFixed(2)}</span></label>
 
@@ -3206,6 +3398,30 @@ function renderRailInspector() {
         const arr = key === 'amount' ? CONFIG.laneHaloAmount : CONFIG.laneHaloSigma;
         if (Array.isArray(arr)) arr[rid] = parseFloat(v);
         if (valSpan) valSpan.textContent = parseFloat(v).toFixed(2);
+      } else if (key === 'laneColor') {
+        if (!Array.isArray(CONFIG.laneColors)) CONFIG.laneColors = [];
+        CONFIG.laneColors[rid] = v;
+      } else if (key === 'railWidth') {
+        if (!Array.isArray(CONFIG.laneRailWidths)) {
+          CONFIG.laneRailWidths = new Array(MAX_LANE_BUCKETS).fill(0);
+        }
+        const n = parseInt(v, 10);
+        CONFIG.laneRailWidths[rid] = n;   // 0 = auto (use global)
+        if (valSpan) valSpan.textContent = (n > 0) ? String(n) : 'auto';
+      } else if (key === 'railOpacity') {
+        if (!Array.isArray(CONFIG.laneRailOpacities)) {
+          CONFIG.laneRailOpacities = new Array(MAX_LANE_BUCKETS).fill(-1);
+        }
+        const f = parseFloat(v);
+        CONFIG.laneRailOpacities[rid] = (f < 0) ? -1 : f;   // negative slider position = auto
+        if (valSpan) valSpan.textContent = (f >= 0) ? f.toFixed(2) : 'auto';
+      } else if (key === 'railProfile') {
+        if (!Array.isArray(CONFIG.laneRailProfiles)) {
+          CONFIG.laneRailProfiles = new Array(MAX_LANE_BUCKETS).fill(-1);
+        }
+        if (v === 'auto')          CONFIG.laneRailProfiles[rid] = -1;
+        else if (v === 'gaussian') CONFIG.laneRailProfiles[rid] = 0;
+        else if (v === 'figma')    CONFIG.laneRailProfiles[rid] = 1;
       } else if (key === 'tickPartnerAmount') {
         if (!Array.isArray(CONFIG.laneTickPartnerAmount)) {
           CONFIG.laneTickPartnerAmount = new Array(MAX_LANE_BUCKETS).fill(0);

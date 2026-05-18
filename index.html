@@ -432,6 +432,10 @@
           <label>Width <input type="range" min="2" max="500" step="1" data-k="tickWidth"><span data-v="tickWidth"></span></label>
           <label>Colour <input type="color" data-k="tickColor"></label>
           <label>Motion blur <input type="range" min="0" max="1" step="0.01" data-k="tickMotionBlur"><span data-v="tickMotionBlur"></span></label>
+          <label>Partner drift <input type="range" min="-10000" max="10000" step="10" data-k="tickPartnerDrift"><span data-v="tickPartnerDrift"></span></label>
+          <div class="preset-hint">World-units per second the partner ticks scroll past the primaries. 0 = locked to camera (partners stay aligned to the rail). Set to N → partners scroll N wu/s faster than primaries; negative = slower / opposite direction. With camera speed 8850, +50 here gives partners at effective 8900 wu/s. Independent of camera, so it still drifts at speed = 0.</div>
+          <label>Partner density <input type="range" min="1" max="10" step="1" data-k="tickPartnerDensity"><span data-v="tickPartnerDensity"></span></label>
+          <div class="preset-hint">How many partner sub-divisions at full amount (= max out-of-sync). 5 = 4 partners between each primary; 2 = one partner halfway. Locked statically — clean integer values avoid moiré beats during amplitude transitions.</div>
           <div class="preset-hint">0 = crisp ticks (may strobe off the freeze speed at high scroll rates); 1 = ticks widen to cover one frame's camera travel and become soft non-flicker bars. Use "Snap to freeze speed" below for the crispest result.</div>
           <button class="preset-btn" id="snap-freeze">Snap to freeze speed</button>
           <div class="preset-hint" id="freeze-hint">freeze ≈ — wu/s @ 60 Hz</div>
