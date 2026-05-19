@@ -144,6 +144,34 @@ const CONFIG = {
   tickPartner2Density:    1,
   tickPartner2Drift:      0,
   tickPartner2Offset:     0.5,   // DC offset from primary positions, as fraction of tickSpacing
+
+  // ── Ink dissolve: domain-warped fbm mask over the body-alpha end-fade.
+  // Reshapes the otherwise-linear end-fade ramp into irregular billowing
+  // patches, so the rail dissolves like ink dispersing in water rather
+  // than crossfading uniformly. 0 = current linear behaviour (back-compat),
+  // 1 = fully warped mask. Apply per rail via laneInkDissolveAmount[].
+  inkDissolveAmount:    0,         // global default (used when per-rail = 0)
+  inkDissolveScale:     0.0005,    // st = wx × scale; smaller = larger ink blobs
+  inkDissolveSpeed:     0.3,       // warp animation rate (cycles/sec-ish)
+  inkDissolveSoftness:  0.15,      // edge softness on the dissolve mask
+  laneInkDissolveAmount: new Array(MAX_LANE_BUCKETS).fill(0),  // per-rail intensity
+  inkBleedReach:        250,       // vertical reach of the post-composite ink tint (wu)
+  // Per-source-rail receiver: -1 means "any other rail's body", or set
+  // to a specific rid (e.g. 2) to confine the ink to ONLY that rail's
+  // body — so red can soak into the blue rail without recolouring the
+  // trunk or anything else along the way.
+  laneInkBleedTarget: new Array(MAX_LANE_BUCKETS).fill(-1),
+  // Segs of "pre-roll" before the rail's end-fade where the ink already
+  // begins to seep into the target. Lengthens the visible bleed so the
+  // ink reads as slow diffusion rather than an abrupt cross-fade.
+  inkBleedPreroll: 0,
+  // KM mix ratio for the "mid pigment colour" — 0 = pure target (blue),
+  // 1 = pure source (red), 0.5 = halfway. Lower keeps the bleed closer
+  // to the target's hue, higher pushes it toward the source.
+  inkBleedMixRatio: 0.5,
+  // Max KM weight in the bleed zone — caps how strongly dst shifts to
+  // the mid-pigment colour. 0 = no effect, 1 = full replacement.
+  inkBleedStrength: 0.5,
   // Per-rail overrides surfaced in the inspector. Each falls back to the
   // global value when its sentinel is set (0 for width, -1 for opacity
   // and profile) so existing presets keep their look.
@@ -757,6 +785,17 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uTickPartner2Drift:      { value: CONFIG.tickPartner2Drift ?? 0 },
     uTickPartner2DriftPhase: { value: 0 },
     uTickPartner2Offset:     { value: CONFIG.tickPartner2Offset ?? 0.5 },
+    uInkDissolveAmount:      { value: CONFIG.inkDissolveAmount ?? 0 },
+    uInkDissolveScale:       { value: CONFIG.inkDissolveScale ?? 0.0005 },
+    uInkDissolveSpeed:       { value: CONFIG.inkDissolveSpeed ?? 0.3 },
+    uInkDissolveSoftness:    { value: CONFIG.inkDissolveSoftness ?? 0.15 },
+    uLaneInkDissolveAmount:  { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uInkBleedReach:          { value: CONFIG.inkBleedReach ?? 250 },
+    uRailInkY:               { value: new Float32Array(MAX_LANE_BUCKETS) },
+    uLaneInkBleedTarget:     { value: new Float32Array(MAX_LANE_BUCKETS).fill(-1) },
+    uInkBleedPreroll:        { value: CONFIG.inkBleedPreroll ?? 0 },
+    uInkBleedMixRatio:       { value: CONFIG.inkBleedMixRatio ?? 0.5 },
+    uInkBleedStrength:       { value: CONFIG.inkBleedStrength ?? 0.5 },
     uLaneRailWidths:        { value: new Float32Array(MAX_LANE_BUCKETS) },
     uLaneRailOpacities:     { value: new Float32Array(MAX_LANE_BUCKETS).fill(-1) },
     uLaneRailProfiles:      { value: new Float32Array(MAX_LANE_BUCKETS).fill(-1) },
@@ -949,6 +988,17 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     uniform float uTickPartner2Drift;
     uniform float uTickPartner2DriftPhase;
     uniform float uTickPartner2Offset;
+    uniform float uInkDissolveAmount;
+    uniform float uInkDissolveScale;
+    uniform float uInkDissolveSpeed;
+    uniform float uInkDissolveSoftness;
+    uniform float uLaneInkDissolveAmount[9];
+    uniform float uInkBleedReach;
+    uniform float uRailInkY[9];
+    uniform float uLaneInkBleedTarget[9];
+    uniform float uInkBleedPreroll;
+    uniform float uInkBleedMixRatio;
+    uniform float uInkBleedStrength;
     uniform float uLaneRailWidths[9];
     uniform float uLaneRailOpacities[9];
     uniform float uLaneRailProfiles[9];
@@ -1127,6 +1177,52 @@ const mat = window.__mat = new THREE.ShaderMaterial({
     // a thin tick rendered at high scroll speed gets stretched into a soft
     // bar that covers the swept distance — kills temporal strobing instead
     // of a 2-wu tick teleporting 75 wu per frame.
+    // ── Ink dissolve helpers (Book of Shaders ch. 13 domain warping) ─────
+    // hash → value noise → 3-octave fbm → 1-warp-pass scalar in [0,1].
+    // Used to reshape the body-alpha end-fade into irregular ink blobs.
+    float inkRandom(vec2 p) {
+      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
+    }
+    float inkNoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      float a = inkRandom(i);
+      float b = inkRandom(i + vec2(1.0, 0.0));
+      float c = inkRandom(i + vec2(0.0, 1.0));
+      float d = inkRandom(i + vec2(1.0, 1.0));
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+    }
+    float inkFbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      mat2 rot = mat2(cos(0.5), sin(0.5), -sin(0.5), cos(0.5));
+      for (int i = 0; i < 3; i++) {
+        v += a * inkNoise(p);
+        p = rot * p * 2.0 + vec2(100.0);
+        a *= 0.5;
+      }
+      return v;
+    }
+    float inkDomainWarp(vec2 st, float t) {
+      // One warp pass: feed fbm into fbm via a 2D displacement.
+      vec2 q = vec2(inkFbm(st + t),
+                    inkFbm(st + vec2(5.2, 1.3) + t * 0.83));
+      return inkFbm(st + q);
+    }
+    // Single-flux Kubelka-Munk mix of two pigments. Equivalent to the
+    // Houdini VEX mix_km(c1, c2, ratio): convert each to K/S, blend in
+    // K/S space, invert back. Produces subtractive-pigment colour mixing
+    // (red + blue → purple, not orange-on-blue).
+    vec3 kmMix(vec3 a, vec3 b, float w) {
+      a = clamp(a, 0.001, 0.999);
+      b = clamp(b, 0.001, 0.999);
+      vec3 KSa = (vec3(1.0) - a) * (vec3(1.0) - a) / (2.0 * a);
+      vec3 KSb = (vec3(1.0) - b) * (vec3(1.0) - b) / (2.0 * b);
+      vec3 KSm = mix(KSa, KSb, clamp(w, 0.0, 1.0));
+      return vec3(1.0) + KSm - sqrt(KSm * KSm + 2.0 * KSm);
+    }
+
     float tickGap(float wx) {
       if (uTickAmount < 1e-3) return 1.0;
       float sp     = max(uTickSpacing, 1.0);
@@ -1463,7 +1559,35 @@ const mat = window.__mat = new THREE.ShaderMaterial({
               }
               if (efEndWX > efStartWX + 0.5 && eAEn > 0.5 &&
                   wxModFade >= efStartWX && wxModFade <= efEndWX) {
+                // Linear end-fade only (the previous warped-fbm dissolve
+                // produced "patches"; the user prefers a smooth fade).
+                // Pigment-mixing is now handled by a post-composite tint
+                // pass at the end of drawRailTopology.
                 endAlphaFade = 1.0 - smoothstep(efStartWX, efEndWX, wxModFade);
+              }
+              // Ink-driven body dissolution: when this rail has
+              // laneInkDissolveAmount > 0, the body alpha ALSO fades in
+              // step with the bleed's reach growth so the original red
+              // shape becomes less and less visible as the ink expands.
+              // Tracks the full bleed window (preroll + end-fade), so the
+              // body starts thinning BEFORE the standard end-fade begins.
+              float inkA = 0.0;
+              for (int k = 0; k < MAX_LANE_BUCKETS; k++) {
+                if (k == rid) { inkA = uLaneInkDissolveAmount[k]; break; }
+              }
+              if (inkA > 1e-4 && efEndWX > efStartWX + 0.5) {
+                float prerollWX = max(uInkBleedPreroll, 0.0) * uSegW;
+                float bleedS    = efStartWX - prerollWX;
+                float bleedE    = efEndWX;
+                if (wxModFade >= bleedS && wxModFade <= bleedE && bleedE > bleedS + 0.5) {
+                  float bleedT    = (wxModFade - bleedS) / (bleedE - bleedS);
+                  float bleedP    = smoothstep(0.0, 1.0, bleedT);
+                  // Reach grows via smoothstep(0, 0.9, bleedP) in the
+                  // bleed tint — match that curve so body alpha drops in
+                  // lockstep with the spread.
+                  float reachFrac = smoothstep(0.0, 0.9, bleedP);
+                  endAlphaFade   *= mix(1.0, 0.0, clamp(reachFrac * inkA, 0.0, 1.0));
+                }
               }
             }
           }
@@ -1847,6 +1971,12 @@ const mat = window.__mat = new THREE.ShaderMaterial({
           // without halo). The values are computed at the top of this
           // rail iteration from the per-rail start/end fade windows.
           alpha *= startAlphaFade * endAlphaFade;
+
+          // Ink bleed is no longer applied as an outward alpha extension
+          // here — it's now a post-composite tint pass that blends the
+          // rail's colour INTO whatever's already painted (so red ink
+          // mixes with blue's pixels instead of stacking on top). See
+          // the loop right before this function returns.
           // Per-rail tick density boost — when a rail branches away from
           // the trunk it gets MORE ticks at the same full brightness as
           // primaries, communicating "more traffic." Density scales with
@@ -2030,9 +2160,102 @@ const mat = window.__mat = new THREE.ShaderMaterial({
           }
         }
       }
-      // Paint uTickColor on top of the composited rails, masked by the
-      // tick-inside factor and the raw rail coverage so the tick only
-      // shows where a rail body exists (not across empty background).
+      // ── Ink bleed post-composite tint (Kubelka-Munk pigment mixing) ──
+      // For each rail with laneInkDissolveAmount > 0, during its end-fade
+      // window, blend its saturated colour into the COMPOSITED pixel
+      // using a single-flux Kubelka-Munk approximation — gives a real
+      // pigment-blend look (red into blue → purple), not the additive
+      // RGB lerp that produces orange-on-top-of-blue. Masked strictly
+      // by other rails' body coverage at this fragment so the tint can
+      // only colour the rail body that's receiving the ink — no spill
+      // into the background and no halo around the rail.
+      // Run BEFORE the tick painter so primary tick paint stays unaffected.
+      if (uLoopLen > 0.5) {
+        float wxModInk = mod(wx, uLoopLen);
+        for (int kk = 0; kk < MAX_LANE_BUCKETS; kk++) {
+          float inkAmt = uLaneInkDissolveAmount[kk];
+          if (inkAmt < 1e-4) inkAmt = uInkDissolveAmount;
+          if (inkAmt < 1e-4) continue;
+          float efS = uRailHaloEndFadeStartWX[kk];
+          float efE = uRailHaloEndFadeEndWX[kk];
+          if (efE <= efS + 0.5) continue;
+          // Extend the bleed window earlier than the rail's end-fade so
+          // the ink begins seeping into the target gradually — instead of
+          // snapping on at the fade boundary. Pre-roll is in segs.
+          float prerollWX = max(uInkBleedPreroll, 0.0) * uSegW;
+          float bleedS    = efS - prerollWX;
+          float bleedE    = efE;
+          if (wxModInk < bleedS || wxModInk > bleedE) continue;
+          float rawT      = (wxModInk - bleedS) / max(bleedE - bleedS, 1.0);
+          // smoothstep eases the start/end of the bleed so the envelope
+          // ramps in/out gently instead of linearly.
+          float progress  = smoothstep(0.0, 1.0, rawT);
+          // Mask: explicit target rail's body alpha when set (>= 0), else
+          // max across all OTHER rails. Setting laneInkBleedTarget[kk]
+          // to e.g. 2 confines red ink strictly to rail 2's body so it
+          // can't recolour the trunk or any unrelated rails.
+          int targetRid = int(uLaneInkBleedTarget[kk] + 0.5);
+          float receiveMask = 0.0;
+          if (uLaneInkBleedTarget[kk] >= 0.0) {
+            for (int j = 0; j < MAX_LANE_BUCKETS; j++) {
+              if (j == targetRid) { receiveMask = laneCov[j]; break; }
+            }
+          } else {
+            for (int j = 0; j < MAX_LANE_BUCKETS; j++) {
+              if (j != kk) receiveMask = max(receiveMask, laneCov[j]);
+            }
+          }
+          // Gate: at least one of source / receiver must be present.
+          if (max(receiveMask, laneCov[kk]) < 1e-3) continue;
+          // Reach EXPANDS with fade progress — bleed starts tight at
+          // rail 1's centerline and grows outward. Eased growth via
+          // smoothstep on a remapped progress so the spread starts slow,
+          // accelerates, then settles — feels more like fluid diffusion.
+          float ry        = uRailInkY[kk];
+          float maxReach  = max(uInkBleedReach, 1.0);
+          float spread    = smoothstep(0.0, 0.9, progress);
+          float reachNow  = mix(maxReach * 0.12, maxReach, spread);
+          float dyAbs     = abs(wy - ry);
+          // Gaussian-shaped falloff instead of linear: soft bell with no
+          // sharp edge. exp(-x*x*k) where k=2.3 gives ~1% at the reach
+          // edge so the boundary fades to near-invisible smoothly.
+          float dn        = dyAbs / max(reachNow, 1.0);
+          float radial    = exp(-dn * dn * 2.3);
+          if (radial < 1e-4) continue;
+          // Wider, gentler bell envelope — rises through 60% of window,
+          // peaks past mid, eases out across the last 30%.
+          float envelope  = smoothstep(0.0, 0.6, progress) * (1.0 - smoothstep(0.75, 1.0, progress));
+          if (envelope < 1e-4) continue;
+          // Pre-compute the "mixed pigment" colour once: KM(source, target, 0.5)
+          // — the purple they'd become if fully mixed. Both rails' bodies in
+          // the bleed zone shift TOWARD this single colour via one KM step,
+          // so red and blue visibly converge to the same purple together
+          // (no chained mixes, no muddy olive).
+          vec3 srcCol = laneColor(kk);
+          vec3 tgtCol = laneColor(0);
+          if (uLaneInkBleedTarget[kk] >= 0.0) {
+            for (int j = 0; j < MAX_LANE_BUCKETS; j++) {
+              if (j == targetRid) { tgtCol = laneColor(j); break; }
+            }
+          } else {
+            tgtCol = srcCol;   // no target → use source (one-sided fallback)
+          }
+          // uInkBleedMixRatio shifts the mid-pigment colour toward source
+          // (1.0) or target (0.0). uInkBleedStrength caps how strongly
+          // dst shifts to that colour — gives a single "intensity" dial.
+          vec3 midCol = kmMix(srcCol, tgtCol, clamp(uInkBleedMixRatio, 0.0, 1.0));
+          float sourceCov = laneCov[kk];
+          float bleedMask = max(receiveMask, sourceCov);
+          float maxW      = clamp(uInkBleedStrength, 0.0, 1.0);
+          float wBoth     = clamp(envelope * inkAmt * bleedMask * radial, 0.0, maxW);
+          if (wBoth > 1e-4) {
+            dst = kmMix(dst, midCol, wBoth);
+          }
+        }
+      }
+      // Paint uTickColor on top of the composited rails (and after any
+      // pigment-mix tint), so primary ticks always render in their own
+      // colour — the ink never recolours the tick gaps.
       float tInside = tickInsideMask(wx);
       if (tInside > 1e-4 && rawMaxA > 1e-4) {
         float tickPaint = tInside * uTickAmount * rawMaxA;
@@ -2193,6 +2416,11 @@ const MOD_TARGETS = [
   { key: 'endChance',          label: 'End chance',    min: 0,    max: 1,     step: 0.01  },
   { key: 'tickPartnerDrift',   label: 'Partner drift', min: -10000, max: 10000, step: 10  },
   { key: 'tickPartner2Drift',  label: 'Partner B drift', min: -10000, max: 10000, step: 10 },
+  { key: 'inkDissolveAmount',  label: 'Ink dissolve',  min: 0,    max: 1,     step: 0.01  },
+  { key: 'inkBleedReach',      label: 'Ink reach',     min: 10,   max: 600,   step: 1     },
+  { key: 'inkBleedPreroll',    label: 'Ink preroll',   min: 0,    max: 16,    step: 0.1   },
+  { key: 'inkBleedMixRatio',   label: 'Ink mix ratio', min: 0,    max: 1,     step: 0.01  },
+  { key: 'inkBleedStrength',   label: 'Ink strength',  min: 0,    max: 1,     step: 0.01  },
   // Per-rail Tick partner amount. arrayKey + index lets the modulator
   // write into CONFIG.laneTickPartnerAmount[index] instead of a top-level
   // scalar — one entry per rail so each rail can be animated independently.
@@ -3085,6 +3313,28 @@ function _applyConfigCore(skipMinimap) {
     ? CONFIG.tickPartner2Density : 1;
   mat.uniforms.uTickPartner2Drift.value = (typeof CONFIG.tickPartner2Drift === 'number') ? CONFIG.tickPartner2Drift : 0;
   mat.uniforms.uTickPartner2Offset.value = (typeof CONFIG.tickPartner2Offset === 'number') ? CONFIG.tickPartner2Offset : 0.5;
+  mat.uniforms.uInkDissolveAmount.value   = (typeof CONFIG.inkDissolveAmount === 'number')   ? CONFIG.inkDissolveAmount   : 0;
+  mat.uniforms.uInkDissolveScale.value    = (typeof CONFIG.inkDissolveScale === 'number')    ? CONFIG.inkDissolveScale    : 0.0005;
+  mat.uniforms.uInkDissolveSpeed.value    = (typeof CONFIG.inkDissolveSpeed === 'number')    ? CONFIG.inkDissolveSpeed    : 0.3;
+  mat.uniforms.uInkDissolveSoftness.value = (typeof CONFIG.inkDissolveSoftness === 'number') ? CONFIG.inkDissolveSoftness : 0.15;
+  const lidArr = Array.isArray(CONFIG.laneInkDissolveAmount) ? CONFIG.laneInkDissolveAmount : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    mat.uniforms.uLaneInkDissolveAmount.value[i] = Number(lidArr[i]) || 0;
+  }
+  mat.uniforms.uInkBleedReach.value = (typeof CONFIG.inkBleedReach === 'number' && CONFIG.inkBleedReach > 0)
+    ? CONFIG.inkBleedReach : 250;
+  const libt = Array.isArray(CONFIG.laneInkBleedTarget) ? CONFIG.laneInkBleedTarget : [];
+  for (let i = 0; i < MAX_LANE_BUCKETS; i++) {
+    const v = Number(libt[i]);
+    mat.uniforms.uLaneInkBleedTarget.value[i] = Number.isFinite(v) ? v : -1;
+  }
+  mat.uniforms.uInkBleedPreroll.value = (typeof CONFIG.inkBleedPreroll === 'number' && CONFIG.inkBleedPreroll >= 0)
+    ? CONFIG.inkBleedPreroll : 0;
+  mat.uniforms.uInkBleedMixRatio.value = (typeof CONFIG.inkBleedMixRatio === 'number')
+    ? Math.max(0, Math.min(1, CONFIG.inkBleedMixRatio)) : 0.5;
+  mat.uniforms.uInkBleedStrength.value = (typeof CONFIG.inkBleedStrength === 'number')
+    ? Math.max(0, Math.min(1, CONFIG.inkBleedStrength)) : 0.5;
+  // uRailInkY is populated after pushPhaseRangeY() runs below.
   const lwArr = Array.isArray(CONFIG.laneRailWidths)    ? CONFIG.laneRailWidths    : [];
   const loArr = Array.isArray(CONFIG.laneRailOpacities) ? CONFIG.laneRailOpacities : [];
   const lpArr = Array.isArray(CONFIG.laneRailProfiles)  ? CONFIG.laneRailProfiles  : [];
@@ -3208,6 +3458,19 @@ function _applyConfigCore(skipMinimap) {
   recomputePhaseRange();
   rebuildLaneData();
   pushPhaseRangeY();
+  // After pushPhaseRangeY has populated railFirstActiveSeg / railLastActiveSeg,
+  // sample each rail's median Y across its active range for the ink-bleed
+  // post-composite tint (the tint's radial falloff centres on this Y).
+  if (typeof SIM !== 'undefined' && SIM.connectionsAt && SIM.laneToY) {
+    for (let rid = 0; rid < MAX_LANE_BUCKETS; rid++) {
+      const f = railFirstActiveSeg ? railFirstActiveSeg[rid] : -1;
+      const l = railLastActiveSeg  ? railLastActiveSeg[rid]  : -1;
+      if (f < 0 || l < 0) { mat.uniforms.uRailInkY.value[rid] = 0; continue; }
+      const conns = SIM.connectionsAt(l) || [];
+      const c = conns.find(cc => (cc.rid === rid || cc.id === rid));
+      mat.uniforms.uRailInkY.value[rid] = c ? SIM.laneToY((c.y1 + c.y2) * 0.5) : 0;
+    }
+  }
 
   renderer.setClearColor(new THREE.Color(CONFIG.bgColor));
 
@@ -3335,6 +3598,22 @@ function renderRailInspector() {
     <label>Amount <input type="range" min="0" max="1" step="0.01" data-rik="amount" value="${amt}"><span data-riv="amount">${amt.toFixed(2)}</span></label>
     <label>Sigma <input type="range" min="0.05" max="6" step="0.05" data-rik="sigma" value="${sig}"><span data-riv="sigma">${sig.toFixed(2)}</span></label>
 
+    <div class="sub-head sub-block">Ink bleed</div>
+    <label>Amount
+      <input type="range" min="0" max="1" step="0.01" data-rik="inkAmount"
+             value="${(CONFIG.laneInkDissolveAmount && CONFIG.laneInkDissolveAmount[rid]) || 0}">
+      <span data-riv="inkAmount">${((CONFIG.laneInkDissolveAmount && CONFIG.laneInkDissolveAmount[rid]) || 0).toFixed(2)}</span>
+    </label>
+    <label>Target rail
+      <input type="range" min="-1" max="8" step="1" data-rik="inkTarget"
+             value="${(CONFIG.laneInkBleedTarget && CONFIG.laneInkBleedTarget[rid] != null) ? CONFIG.laneInkBleedTarget[rid] : -1}">
+      <span data-riv="inkTarget">${
+        (CONFIG.laneInkBleedTarget && CONFIG.laneInkBleedTarget[rid] >= 0)
+          ? String(CONFIG.laneInkBleedTarget[rid])
+          : 'any'
+      }</span>
+    </label>
+
     <div class="sub-head sub-block">Tick partner</div>
     <label>Amount
       <input type="range" min="0" max="1" step="0.01" data-rik="tickPartnerAmount"
@@ -3422,6 +3701,19 @@ function renderRailInspector() {
         if (v === 'auto')          CONFIG.laneRailProfiles[rid] = -1;
         else if (v === 'gaussian') CONFIG.laneRailProfiles[rid] = 0;
         else if (v === 'figma')    CONFIG.laneRailProfiles[rid] = 1;
+      } else if (key === 'inkAmount') {
+        if (!Array.isArray(CONFIG.laneInkDissolveAmount)) {
+          CONFIG.laneInkDissolveAmount = new Array(MAX_LANE_BUCKETS).fill(0);
+        }
+        CONFIG.laneInkDissolveAmount[rid] = parseFloat(v);
+        if (valSpan) valSpan.textContent = parseFloat(v).toFixed(2);
+      } else if (key === 'inkTarget') {
+        if (!Array.isArray(CONFIG.laneInkBleedTarget)) {
+          CONFIG.laneInkBleedTarget = new Array(MAX_LANE_BUCKETS).fill(-1);
+        }
+        const n = parseInt(v, 10);
+        CONFIG.laneInkBleedTarget[rid] = n;
+        if (valSpan) valSpan.textContent = (n >= 0) ? String(n) : 'any';
       } else if (key === 'tickPartnerAmount') {
         if (!Array.isArray(CONFIG.laneTickPartnerAmount)) {
           CONFIG.laneTickPartnerAmount = new Array(MAX_LANE_BUCKETS).fill(0);

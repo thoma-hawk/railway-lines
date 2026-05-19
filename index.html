@@ -446,6 +446,18 @@
         </div>
 
         <div class="sub-block">
+          <div class="sub-head">Ink bleed</div>
+          <label>Reach <input type="range" min="10" max="600" step="1" data-k="inkBleedReach"><span data-v="inkBleedReach"></span></label>
+          <div class="preset-hint">Vertical radius (world units) of the bleed zone around the source rail's centreline. Bigger = ink spreads further into the receiving rail's body.</div>
+          <label>Pre-roll <input type="range" min="0" max="16" step="0.1" data-k="inkBleedPreroll"><span data-v="inkBleedPreroll"></span></label>
+          <div class="preset-hint">Segments before the source rail's end-fade where the bleed already begins. Lengthens the transition so the ink seeps in gradually instead of snapping on at the fade boundary.</div>
+          <label>Mix ratio <input type="range" min="0" max="1" step="0.01" data-k="inkBleedMixRatio"><span data-v="inkBleedMixRatio"></span></label>
+          <div class="preset-hint">KM mix ratio toward source colour. 0 = mid colour is the target's hue, 1 = source's hue, 0.5 = halfway. Use this to control whether the bleed reads more red or more blue.</div>
+          <label>Strength <input type="range" min="0" max="1" step="0.01" data-k="inkBleedStrength"><span data-v="inkBleedStrength"></span></label>
+          <div class="preset-hint">Max KM weight at the peak of the bleed — how strongly dst shifts toward the mixed pigment colour. 0 = no effect, 1 = full replacement.</div>
+        </div>
+
+        <div class="sub-block">
           <div class="sub-head">Bursts</div>
           <label>Amount <input type="range" min="0" max="1" step="0.01" data-k="burstAmount"><span data-v="burstAmount"></span></label>
           <label>Density <input type="range" min="0" max="1" step="0.01" data-k="burstDensity"><span data-v="burstDensity"></span></label>
